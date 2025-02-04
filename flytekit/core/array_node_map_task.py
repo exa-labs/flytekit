@@ -4,10 +4,25 @@ import hashlib
 import math
 import os  # TODO: use flytekit logger
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Concatenate,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Set,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
 
 from flyteidl.core import tasks_pb2
 from flyteidl.core import workflow_pb2 as _core_workflow
+from typing_extensions import ParamSpec
 
 from flytekit.configuration import SerializationSettings
 from flytekit.core import tracker
@@ -30,6 +45,16 @@ from flytekit.utils.asyn import loop_manager
 
 if TYPE_CHECKING:
     from flytekit.remote import FlyteLaunchPlan
+
+# Update type variables
+P = ParamSpec("P")  # For function parameters
+T = TypeVar("T")  # For input types
+R = TypeVar("R")  # For return types
+
+
+# Update Protocol to handle kwargs
+class MapTaskCallable(Protocol[T, R]):
+    def __call__(self, **kwargs: List[T]) -> List[R]: ...
 
 
 class ArrayNodeMapTask(PythonTask):
@@ -369,13 +394,54 @@ class ArrayNodeMapTask(PythonTask):
         return outputs
 
 
+if TYPE_CHECKING:
+
+    @overload
+    def map_task(
+        target: Callable[Concatenate[T, P], R],  # Function that takes T as first param and other params
+        concurrency: Optional[int] = None,
+        min_successes: Optional[int] = None,
+        min_success_ratio: float = 1.0,
+        **kwargs,
+    ) -> MapTaskCallable[T, R]: ...
+
+    @overload
+    def map_task(
+        target: Union[LaunchPlan, "FlyteLaunchPlan", ReferenceTask],
+        concurrency: Optional[int] = None,
+        min_successes: Optional[int] = None,
+        min_success_ratio: float = 1.0,
+        **kwargs,
+    ) -> Callable[..., List[Any]]: ...
+
+else:
+
+    @overload
+    def map_task(
+        target: Callable[Concatenate[T, P], R],
+        concurrency: Optional[int] = None,
+        min_successes: Optional[int] = None,
+        min_success_ratio: float = 1.0,
+        **kwargs,
+    ) -> ArrayNodeMapTask: ...
+
+    @overload
+    def map_task(
+        target: Union[LaunchPlan, "FlyteLaunchPlan", ReferenceTask],
+        concurrency: Optional[int] = None,
+        min_successes: Optional[int] = None,
+        min_success_ratio: float = 1.0,
+        **kwargs,
+    ) -> "array_node.ArrayNode": ...
+
+
 def map_task(
-    target: Union[LaunchPlan, PythonFunctionTask, "FlyteLaunchPlan"],
+    target: Union[Callable[Concatenate[T, P], R], LaunchPlan, "FlyteLaunchPlan", ReferenceTask],
     concurrency: Optional[int] = None,
     min_successes: Optional[int] = None,
     min_success_ratio: float = 1.0,
     **kwargs,
-):
+) -> Union[ArrayNodeMapTask, "array_node.ArrayNode", MapTaskCallable[T, R]]:
     """
     Wrapper that creates a map task utilizing either the existing ArrayNodeMapTask
     or the drop in replacement ArrayNode implementation
@@ -406,13 +472,30 @@ def map_task(
     )
 
 
+@overload
 def array_node_map_task(
-    task_function: PythonFunctionTask,
+    task_function: Callable[Concatenate[T, P], R],
     concurrency: Optional[int] = None,
-    # TODO why no min_successes?
     min_success_ratio: float = 1.0,
     **kwargs,
-):
+) -> MapTaskCallable[T, R]: ...
+
+
+@overload
+def array_node_map_task(
+    task_function: Callable[Concatenate[T, P], R],
+    concurrency: Optional[int] = None,
+    min_success_ratio: float = 1.0,
+    **kwargs,
+) -> ArrayNodeMapTask: ...
+
+
+def array_node_map_task(
+    task_function: Callable[Concatenate[T, P], R],
+    concurrency: Optional[int] = None,
+    min_success_ratio: float = 1.0,
+    **kwargs,
+) -> Union[ArrayNodeMapTask, MapTaskCallable[T, R]]:
     """Map task that uses the ``ArrayNode`` construct..
 
     .. important::
@@ -482,7 +565,7 @@ class ArrayNodeMapTaskResolver(tracker.TrackedInstance, TaskResolverMixin):
     def loader_args(self, settings: SerializationSettings, t: ArrayNodeMapTask) -> List[str]:  # type:ignore
         return [
             "vars",
-            f'{",".join(sorted(t.bound_inputs))}',
+            f"{','.join(sorted(t.bound_inputs))}",
             "resolver",
             t.python_function_task.task_resolver.location,
             *t.python_function_task.task_resolver.loader_args(settings, t.python_function_task),
