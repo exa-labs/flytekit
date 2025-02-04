@@ -11,6 +11,7 @@ from subprocess import run
 from typing import ClassVar, List, NamedTuple
 
 import click
+import toml
 
 from flytekit.constants import CopyFileDetection
 from flytekit.image_spec.image_spec import (
@@ -114,6 +115,8 @@ ENV PATH="$EXTRA_PATH:$$PATH" \
     SSL_CERT_DIR=/etc/ssl/certs \
     $ENV
 
+$COPY_LOCAL_PACKAGES
+
 $UV_PYTHON_INSTALL_COMMAND
 
 # Adds nvidia just in case it exists
@@ -162,24 +165,107 @@ def _is_flytekit(package: str) -> bool:
     return name == "flytekit"
 
 
+def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
+    """Copy local packages into the Docker build context and update their paths in the lock file."""
+    if not image_spec.requirements or not os.path.basename(image_spec.requirements) == "uv.lock":
+        return
+
+    # Read the lock file
+    requirements = str(image_spec.requirements)  # Convert to str for type safety
+    with open(requirements) as f:
+        lock_content = f.read()
+
+    # Create a directory for local packages
+    local_packages_dir = tmp_dir / "local_packages"
+    local_packages_dir.mkdir(exist_ok=True)
+
+    # Get the directory containing the lock file
+    lock_dir = Path(os.path.dirname(requirements))
+
+    # Read pyproject.toml to get local package paths
+    pyproject_path = lock_dir / "pyproject.toml"
+    if not pyproject_path.exists():
+        return
+
+    pyproject_data = toml.load(pyproject_path)
+    local_sources = pyproject_data.get("tool", {}).get("uv", {}).get("sources", {})
+
+    # Copy each local package and update its path in the lock file
+    for package_name, package_info in local_sources.items():
+        if "path" not in package_info:
+            continue
+
+        # Resolve the absolute path of the package relative to the lock file directory
+        package_path = (lock_dir / package_info["path"]).resolve()
+        if not package_path.exists():
+            warnings.warn(f"Local package path does not exist: {package_path}", UserWarning)
+            continue
+
+        # Copy the package to the build context
+        target_path = local_packages_dir / package_name
+        if package_path.is_dir():
+            shutil.copytree(package_path, target_path, dirs_exist_ok=True)
+            # Copy pyproject.toml if it exists in the package
+            pkg_pyproject = package_path / "pyproject.toml"
+            if pkg_pyproject.exists():
+                shutil.copy2(pkg_pyproject, target_path / "pyproject.toml")
+        else:
+            shutil.copy2(package_path, target_path)
+
+        # Update the path in the lock file
+        old_path = package_info["path"]
+        new_path = f"/root/local_packages/{package_name}"  # Use absolute path in container
+        lock_content = lock_content.replace(f'directory = "{old_path}"', f'directory = "{new_path}"')
+        lock_content = lock_content.replace(f'editable = "{old_path}"', f'directory = "{new_path}"')
+
+        # Update the path in pyproject.toml data
+        if "tool" not in pyproject_data:
+            pyproject_data["tool"] = {}
+        if "uv" not in pyproject_data["tool"]:
+            pyproject_data["tool"]["uv"] = {}
+        if "sources" not in pyproject_data["tool"]["uv"]:
+            pyproject_data["tool"]["uv"]["sources"] = {}
+
+        pyproject_data["tool"]["uv"]["sources"][package_name] = {"path": new_path}
+
+    # Write the updated lock file
+    lock_path = tmp_dir / "uv.lock"
+    lock_path.write_text(lock_content)
+
+    # Write the updated pyproject.toml
+    pyproject_toml_path = tmp_dir / "pyproject.toml"
+    with open(pyproject_toml_path, "w") as f:
+        toml.dump(pyproject_data, f)
+
+
 def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir: Path):
     if image_spec.packages is not None:
         msg = f"Support for {lock_file} files and packages is mutually exclusive"
         raise ValueError(msg)
 
-    lock_path = tmp_dir / lock_file
-    shutil.copy2(image_spec.requirements, lock_path)
+    # Copy and update local packages first
+    _copy_local_packages_and_update_lock(image_spec, tmp_dir)
 
-    # lock requires pyproject.toml to be included
-    pyproject_toml_path = tmp_dir / "pyproject.toml"
-    dir_name = os.path.dirname(image_spec.requirements)
+    # If we haven't already copied the lock file in _copy_local_packages_and_update_lock
+    if not (tmp_dir / lock_file).exists():
+        if not image_spec.requirements:
+            raise ValueError("requirements must be set")
+        lock_path = tmp_dir / lock_file
+        shutil.copy2(image_spec.requirements, lock_path)
 
-    pyproject_toml_src = os.path.join(dir_name, "pyproject.toml")
-    if not os.path.exists(pyproject_toml_src):
-        msg = f"To use {lock_file}, a pyproject.toml file must be in the same directory as the lock file"
-        raise ValueError(msg)
+    # If we haven't already copied pyproject.toml in _copy_local_packages_and_update_lock
+    if not (tmp_dir / "pyproject.toml").exists():
+        # lock requires pyproject.toml to be included
+        if not image_spec.requirements:
+            raise ValueError("requirements must be set")
+        dir_name = os.path.dirname(image_spec.requirements)
 
-    shutil.copy2(pyproject_toml_src, pyproject_toml_path)
+        pyproject_toml_src = os.path.join(dir_name, "pyproject.toml")
+        if not os.path.exists(pyproject_toml_src):
+            msg = f"To use {lock_file}, a pyproject.toml file must be in the same directory as the lock file"
+            raise ValueError(msg)
+
+        shutil.copy2(pyproject_toml_src, tmp_dir / "pyproject.toml")
 
 
 def prepare_uv_lock_command(image_spec: ImageSpec, pip_install_args: List[str], tmp_dir: Path) -> str:
@@ -193,9 +279,9 @@ def prepare_uv_lock_command(image_spec: ImageSpec, pip_install_args: List[str], 
     # --no-dev: Omit the development dependency group
     # --no-install-project: Do not install the current project
     pip_install_args.extend(["--locked", "--no-dev", "--no-install-project"])
-    pip_install_args = " ".join(pip_install_args)
+    pip_install_args_str = " ".join(pip_install_args)
 
-    return UV_LOCK_INSTALL_TEMPLATE.substitute(PIP_INSTALL_ARGS=pip_install_args)
+    return UV_LOCK_INSTALL_TEMPLATE.substitute(PIP_INSTALL_ARGS=pip_install_args_str)
 
 
 def prepare_poetry_lock_command(image_spec: ImageSpec, pip_install_args: List[str], tmp_dir: Path) -> str:
@@ -203,8 +289,8 @@ def prepare_poetry_lock_command(image_spec: ImageSpec, pip_install_args: List[st
 
     # --no-root: Do not install the current project
     pip_install_args.extend(["--no-root"])
-    pip_install_args = " ".join(pip_install_args)
-    return POETRY_LOCK_TEMPLATE.substitute(PIP_INSTALL_ARGS=pip_install_args)
+    pip_install_args_str = " ".join(pip_install_args)
+    return POETRY_LOCK_TEMPLATE.substitute(PIP_INSTALL_ARGS=pip_install_args_str)
 
 
 def prepare_python_install(image_spec: ImageSpec, tmp_dir: Path) -> str:
@@ -385,6 +471,13 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
     else:
         extra_copy_cmds = ""
 
+    # Check if local_packages directory exists and is not empty
+    local_packages_dir = tmp_dir / "local_packages"
+    if local_packages_dir.exists() and any(local_packages_dir.iterdir()):
+        copy_local_packages = "COPY --chown=flytekit local_packages /root/local_packages"
+    else:
+        copy_local_packages = ""
+
     docker_content = DOCKER_FILE_TEMPLATE.substitute(
         UV_PYTHON_INSTALL_COMMAND=uv_python_install_command,
         APT_INSTALL_COMMAND=apt_install_command,
@@ -397,6 +490,7 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
         ENTRYPOINT=entrypoint,
         RUN_COMMANDS=run_commands,
         EXTRA_COPY_CMDS=extra_copy_cmds,
+        COPY_LOCAL_PACKAGES=copy_local_packages,
     )
 
     dockerfile_path = tmp_dir / "Dockerfile"
@@ -470,3 +564,4 @@ class DefaultImageBuilder(ImageSpecBuilder):
             concat_command = " ".join(command)
             click.secho(f"Run command: {concat_command} ", fg="blue")
             run(command, check=True)
+            return image_spec.image_name()

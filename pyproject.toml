@@ -43,12 +43,13 @@ dependencies = [
     "pygments",
     "python-json-logger>=2.0.0",
     "pytimeparse>=1.1.8",
-    "pyyaml!=6.0.0,!=5.4.0,!=5.4.1",  # pyyaml is broken with cython 3: https://github.com/yaml/pyyaml/issues/601
+    "pyyaml!=6.0.0,!=5.4.0,!=5.4.1", # pyyaml is broken with cython 3: https://github.com/yaml/pyyaml/issues/601
     "requests>=2.18.4",
     "rich",
     "rich_click",
     "s3fs>=2023.3.0,!=2024.3.1",
     "statsd>=3.0.0",
+    "toml>=0.10.2",
     "typing_extensions",
     "urllib3>=1.22",
 ]
