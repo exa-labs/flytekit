@@ -4,7 +4,7 @@ import datetime
 import inspect
 import os
 from functools import partial, update_wrapper
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple, Type, TypeVar, Union, overload
 
 from typing_extensions import ParamSpec  # type: ignore
 
@@ -92,82 +92,161 @@ T = TypeVar("T")
 FuncOut = TypeVar("FuncOut")
 
 
-@overload
-def task(
-    _task_function: None = ...,
-    task_config: Optional[T] = ...,
-    cache: bool = ...,
-    cache_serialize: bool = ...,
-    cache_version: str = ...,
-    cache_ignore_input_vars: Tuple[str, ...] = ...,
-    retries: int = ...,
-    interruptible: Optional[bool] = ...,
-    deprecated: str = ...,
-    timeout: Union[datetime.timedelta, int] = ...,
-    container_image: Optional[Union[str, ImageSpec]] = ...,
-    environment: Optional[Dict[str, str]] = ...,
-    requests: Optional[Resources] = ...,
-    limits: Optional[Resources] = ...,
-    secret_requests: Optional[List[Secret]] = ...,
-    execution_mode: PythonFunctionTask.ExecutionBehavior = ...,
-    node_dependency_hints: Optional[
-        Iterable[
-            Union[
-                PythonFunctionTask,
-                _annotated_launchplan.LaunchPlan,
-                _annotated_workflow.WorkflowBase,
-            ]
-        ]
-    ] = ...,
-    task_resolver: Optional[TaskResolverMixin] = ...,
-    docs: Optional[Documentation] = ...,
-    disable_deck: Optional[bool] = ...,
-    enable_deck: Optional[bool] = ...,
-    deck_fields: Optional[Tuple[DeckField, ...]] = ...,
-    pod_template: Optional["PodTemplate"] = ...,
-    pod_template_name: Optional[str] = ...,
-    accelerator: Optional[BaseAccelerator] = ...,
-    pickle_untyped: bool = ...,
-) -> Callable[[Callable[..., FuncOut]], PythonFunctionTask[T]]: ...
+if TYPE_CHECKING:
 
-
-@overload
-def task(
-    _task_function: Callable[P, FuncOut],
-    task_config: Optional[T] = ...,
-    cache: bool = ...,
-    cache_serialize: bool = ...,
-    cache_version: str = ...,
-    cache_ignore_input_vars: Tuple[str, ...] = ...,
-    retries: int = ...,
-    interruptible: Optional[bool] = ...,
-    deprecated: str = ...,
-    timeout: Union[datetime.timedelta, int] = ...,
-    container_image: Optional[Union[str, ImageSpec]] = ...,
-    environment: Optional[Dict[str, str]] = ...,
-    requests: Optional[Resources] = ...,
-    limits: Optional[Resources] = ...,
-    secret_requests: Optional[List[Secret]] = ...,
-    execution_mode: PythonFunctionTask.ExecutionBehavior = ...,
-    node_dependency_hints: Optional[
-        Iterable[
-            Union[
-                PythonFunctionTask,
-                _annotated_launchplan.LaunchPlan,
-                _annotated_workflow.WorkflowBase,
+    @overload
+    def task(
+        _task_function: None = None,
+        task_config: Optional[T] = None,
+        cache: bool = ...,
+        cache_serialize: bool = ...,
+        cache_version: str = ...,
+        cache_ignore_input_vars: Tuple[str, ...] = ...,
+        retries: int = ...,
+        interruptible: Optional[bool] = ...,
+        deprecated: str = ...,
+        timeout: Union[datetime.timedelta, int] = ...,
+        container_image: Optional[Union[str, ImageSpec]] = ...,
+        environment: Optional[Dict[str, str]] = ...,
+        requests: Optional[Resources] = ...,
+        limits: Optional[Resources] = ...,
+        secret_requests: Optional[List[Secret]] = ...,
+        execution_mode: PythonFunctionTask.ExecutionBehavior = ...,
+        node_dependency_hints: Optional[
+            Iterable[
+                Union[
+                    PythonFunctionTask,
+                    _annotated_launchplan.LaunchPlan,
+                    _annotated_workflow.WorkflowBase,
+                ]
             ]
-        ]
-    ] = ...,
-    task_resolver: Optional[TaskResolverMixin] = ...,
-    docs: Optional[Documentation] = ...,
-    disable_deck: Optional[bool] = ...,
-    enable_deck: Optional[bool] = ...,
-    deck_fields: Optional[Tuple[DeckField, ...]] = ...,
-    pod_template: Optional["PodTemplate"] = ...,
-    pod_template_name: Optional[str] = ...,
-    accelerator: Optional[BaseAccelerator] = ...,
-    pickle_untyped: bool = ...,
-) -> Union[Callable[P, FuncOut], PythonFunctionTask[T]]: ...
+        ] = ...,
+        task_resolver: Optional[TaskResolverMixin] = ...,
+        docs: Optional[Documentation] = ...,
+        disable_deck: Optional[bool] = ...,
+        enable_deck: Optional[bool] = ...,
+        deck_fields: Optional[Tuple[DeckField, ...]] = ...,
+        pod_template: Optional["PodTemplate"] = ...,
+        pod_template_name: Optional[str] = ...,
+        accelerator: Optional[BaseAccelerator] = ...,
+        pickle_untyped: bool = ...,
+    ) -> Callable[[Callable[P, FuncOut]], Callable[P, FuncOut]]: ...
+
+    @overload
+    def task(
+        _task_function: Callable[P, FuncOut],
+        task_config: Optional[T] = None,
+        cache: bool = ...,
+        cache_serialize: bool = ...,
+        cache_version: str = ...,
+        cache_ignore_input_vars: Tuple[str, ...] = ...,
+        retries: int = ...,
+        interruptible: Optional[bool] = ...,
+        deprecated: str = ...,
+        timeout: Union[datetime.timedelta, int] = ...,
+        container_image: Optional[Union[str, ImageSpec]] = ...,
+        environment: Optional[Dict[str, str]] = ...,
+        requests: Optional[Resources] = ...,
+        limits: Optional[Resources] = ...,
+        secret_requests: Optional[List[Secret]] = ...,
+        execution_mode: PythonFunctionTask.ExecutionBehavior = ...,
+        node_dependency_hints: Optional[
+            Iterable[
+                Union[
+                    PythonFunctionTask,
+                    _annotated_launchplan.LaunchPlan,
+                    _annotated_workflow.WorkflowBase,
+                ]
+            ]
+        ] = ...,
+        task_resolver: Optional[TaskResolverMixin] = ...,
+        docs: Optional[Documentation] = ...,
+        disable_deck: Optional[bool] = ...,
+        enable_deck: Optional[bool] = ...,
+        deck_fields: Optional[Tuple[DeckField, ...]] = ...,
+        pod_template: Optional["PodTemplate"] = ...,
+        pod_template_name: Optional[str] = ...,
+        accelerator: Optional[BaseAccelerator] = ...,
+        pickle_untyped: bool = ...,
+    ) -> Callable[P, FuncOut]: ...
+
+else:
+    # At runtime, task functions return Promise objects
+    @overload
+    def task(
+        _task_function: None = None,
+        task_config: Optional[T] = None,
+        cache: bool = ...,
+        cache_serialize: bool = ...,
+        cache_version: str = ...,
+        cache_ignore_input_vars: Tuple[str, ...] = ...,
+        retries: int = ...,
+        interruptible: Optional[bool] = ...,
+        deprecated: str = ...,
+        timeout: Union[datetime.timedelta, int] = ...,
+        container_image: Optional[Union[str, ImageSpec]] = ...,
+        environment: Optional[Dict[str, str]] = ...,
+        requests: Optional[Resources] = ...,
+        limits: Optional[Resources] = ...,
+        secret_requests: Optional[List[Secret]] = ...,
+        execution_mode: PythonFunctionTask.ExecutionBehavior = ...,
+        node_dependency_hints: Optional[
+            Iterable[
+                Union[
+                    PythonFunctionTask,
+                    _annotated_launchplan.LaunchPlan,
+                    _annotated_workflow.WorkflowBase,
+                ]
+            ]
+        ] = ...,
+        task_resolver: Optional[TaskResolverMixin] = ...,
+        docs: Optional[Documentation] = ...,
+        disable_deck: Optional[bool] = ...,
+        enable_deck: Optional[bool] = ...,
+        deck_fields: Optional[Tuple[DeckField, ...]] = ...,
+        pod_template: Optional["PodTemplate"] = ...,
+        pod_template_name: Optional[str] = ...,
+        accelerator: Optional[BaseAccelerator] = ...,
+        pickle_untyped: bool = ...,
+    ) -> Callable[[Callable[P, FuncOut]], PythonFunctionTask[T]]: ...
+
+    @overload
+    def task(
+        _task_function: Callable[P, FuncOut],
+        task_config: Optional[T] = None,
+        cache: bool = ...,
+        cache_serialize: bool = ...,
+        cache_version: str = ...,
+        cache_ignore_input_vars: Tuple[str, ...] = ...,
+        retries: int = ...,
+        interruptible: Optional[bool] = ...,
+        deprecated: str = ...,
+        timeout: Union[datetime.timedelta, int] = ...,
+        container_image: Optional[Union[str, ImageSpec]] = ...,
+        environment: Optional[Dict[str, str]] = ...,
+        requests: Optional[Resources] = ...,
+        limits: Optional[Resources] = ...,
+        secret_requests: Optional[List[Secret]] = ...,
+        execution_mode: PythonFunctionTask.ExecutionBehavior = ...,
+        node_dependency_hints: Optional[
+            Iterable[
+                Union[
+                    PythonFunctionTask,
+                    _annotated_launchplan.LaunchPlan,
+                    _annotated_workflow.WorkflowBase,
+                ]
+            ]
+        ] = ...,
+        task_resolver: Optional[TaskResolverMixin] = ...,
+        docs: Optional[Documentation] = ...,
+        disable_deck: Optional[bool] = ...,
+        enable_deck: Optional[bool] = ...,
+        deck_fields: Optional[Tuple[DeckField, ...]] = ...,
+        pod_template: Optional["PodTemplate"] = ...,
+        pod_template_name: Optional[str] = ...,
+        accelerator: Optional[BaseAccelerator] = ...,
+        pickle_untyped: bool = ...,
+    ) -> PythonFunctionTask[T]: ...
 
 
 def task(
@@ -215,6 +294,7 @@ def task(
     Callable[P, FuncOut],
     Callable[[Callable[P, FuncOut]], PythonFunctionTask[T]],
     PythonFunctionTask[T],
+    Callable[[Callable[P, FuncOut]], Callable[P, FuncOut]],
 ]:
     """
     This is the core decorator to use for any task type in flytekit.
