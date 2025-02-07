@@ -119,6 +119,10 @@ $COPY_LOCAL_PACKAGES
 
 $UV_PYTHON_INSTALL_COMMAND
 
+# Clean up local packages after installation
+RUN rm -rf /root/local_packages
+RUN rm -rf /root/.cargo
+
 # Adds nvidia just in case it exists
 ENV PATH="$$PATH:/usr/local/nvidia/bin:/usr/local/cuda/bin" \
     LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$$LD_LIBRARY_PATH"
