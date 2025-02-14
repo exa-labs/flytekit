@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import click
 import requests
+import toml
 from packaging.version import Version
 
 from flytekit.constants import CopyFileDetection
@@ -193,7 +194,36 @@ class ImageSpec:
             spec = dataclasses.replace(spec, copy=digest)
 
         if spec.requirements:
-            requirements = hashlib.sha1(pathlib.Path(spec.requirements).read_bytes().strip()).hexdigest()
+            # If requirements is a uv.lock file, parse it and hash local dependencies
+            if spec.requirements.endswith("uv.lock"):
+                from flytekit.tools.fast_registration import compute_digest
+
+                hasher = hashlib.sha1()
+                # First hash the uv.lock file itself
+                hasher.update(pathlib.Path(spec.requirements).read_bytes().strip())
+
+                # Parse the uv.lock file
+                lock_data = toml.load(spec.requirements)
+
+                # Look for packages with local sources (directory or editable)
+                for package in lock_data.get("package", []):
+                    source = package.get("source", {})
+                    if source:
+                        if "directory" in source:
+                            # Hash the directory contents
+                            dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / source["directory"]
+                            dir_hash = compute_digest(dir_path)
+                            hasher.update(dir_hash.encode())
+                        elif "editable" in source:
+                            # Hash the editable package directory
+                            edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / source["editable"]
+                            edit_hash = compute_digest(edit_path)
+                            hasher.update(edit_hash.encode())
+
+                requirements = hasher.hexdigest()
+            else:
+                # For regular requirements files, just hash the file contents
+                requirements = hashlib.sha1(pathlib.Path(spec.requirements).read_bytes().strip()).hexdigest()
             spec = dataclasses.replace(spec, requirements=requirements)
 
         # won't rebuild the image if we change the registry_config path
