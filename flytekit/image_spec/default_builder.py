@@ -170,72 +170,69 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     if not image_spec.requirements or not os.path.basename(image_spec.requirements) == "uv.lock":
         return
 
-    # Read the lock file
-    requirements = str(image_spec.requirements)  # Convert to str for type safety
+    # Read the lock file and parse as TOML
+    requirements = str(image_spec.requirements)
     with open(requirements) as f:
         lock_content = f.read()
+        lock_data = toml.loads(lock_content)
+
+    lock_dir = Path(os.path.dirname(requirements))
+
+    # Copy and update pyproject.toml from lock file directory
+    pyproject_toml_src = lock_dir / "pyproject.toml"
+    if not pyproject_toml_src.exists():
+        raise ValueError("pyproject.toml must exist in the same directory as uv.lock")
+
+    with open(pyproject_toml_src) as f:
+        pyproject_content = f.read()
 
     # Create a directory for local packages
     local_packages_dir = tmp_dir / "local_packages"
     local_packages_dir.mkdir(exist_ok=True)
 
-    # Get the directory containing the lock file
-    lock_dir = Path(os.path.dirname(requirements))
+    # Copy each local package from the lock file and update its path
+    for package in lock_data["package"]:
+        source = package["source"]
 
-    # Read pyproject.toml to get local package paths
-    pyproject_path = lock_dir / "pyproject.toml"
-    if not pyproject_path.exists():
-        return
-
-    pyproject_data = toml.load(pyproject_path)
-    local_sources = pyproject_data.get("tool", {}).get("uv", {}).get("sources", {})
-
-    # Copy each local package and update its path in the lock file
-    for package_name, package_info in local_sources.items():
-        if "path" not in package_info:
+        if "directory" in source:
+            source_type = "directory"
+        elif "editable" in source:
+            source_type = "editable"
+        else:
             continue
 
-        # Resolve the absolute path of the package relative to the lock file directory
-        package_path = (lock_dir / package_info["path"]).resolve()
+        # Get the absolute path of the package
+        package_path = (lock_dir / source[source_type]).resolve()
         if not package_path.exists():
-            warnings.warn(f"Local package path does not exist: {package_path}", UserWarning)
-            continue
+            raise ValueError(f"Local package path does not exist: {package_path}")
+
+        # Get the relative path components and sanitize them
+        rel_path = os.path.relpath(package_path, start=lock_dir)
+        # Remove any parent directory references
+        safe_path = Path(*(part for part in Path(rel_path).parts if part not in ("..", ".")))
+        target_path = local_packages_dir / safe_path
+
+        # Create parent directories if they don't exist
+        target_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Copy the package to the build context
-        target_path = local_packages_dir / package_name
         if package_path.is_dir():
             shutil.copytree(package_path, target_path, dirs_exist_ok=True)
-            # Copy pyproject.toml if it exists in the package
-            pkg_pyproject = package_path / "pyproject.toml"
-            if pkg_pyproject.exists():
-                shutil.copy2(pkg_pyproject, target_path / "pyproject.toml")
         else:
             shutil.copy2(package_path, target_path)
 
-        # Update the path in the lock file
-        old_path = package_info["path"]
-        new_path = f"/root/local_packages/{package_name}"  # Use absolute path in container
-        lock_content = lock_content.replace(f'directory = "{old_path}"', f'directory = "{new_path}"')
-        lock_content = lock_content.replace(f'editable = "{old_path}"', f'directory = "{new_path}"')
+        # Update the paths in both files
+        old_path = source[source_type]
+        new_path = f"/root/local_packages/{safe_path}"  # Use absolute path in container
+        lock_content = lock_content.replace(f'{source_type} = "{old_path}"', f'{source_type} = "{new_path}"')
+        pyproject_content = pyproject_content.replace(f'path = "{old_path}"', f'path = "{new_path}"')
 
-        # Update the path in pyproject.toml data
-        if "tool" not in pyproject_data:
-            pyproject_data["tool"] = {}
-        if "uv" not in pyproject_data["tool"]:
-            pyproject_data["tool"]["uv"] = {}
-        if "sources" not in pyproject_data["tool"]["uv"]:
-            pyproject_data["tool"]["uv"]["sources"] = {}
-
-        pyproject_data["tool"]["uv"]["sources"][package_name] = {"path": new_path}
-
-    # Write the updated lock file
+    # Write the updated files
     lock_path = tmp_dir / "uv.lock"
     lock_path.write_text(lock_content)
 
-    # Write the updated pyproject.toml
-    pyproject_toml_path = tmp_dir / "pyproject.toml"
-    with open(pyproject_toml_path, "w") as f:
-        toml.dump(pyproject_data, f)
+    pyproject_path = tmp_dir / "pyproject.toml"
+    pyproject_path.write_text(pyproject_content)
 
 
 def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir: Path):
@@ -245,27 +242,6 @@ def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir
 
     # Copy and update local packages first
     _copy_local_packages_and_update_lock(image_spec, tmp_dir)
-
-    # If we haven't already copied the lock file in _copy_local_packages_and_update_lock
-    if not (tmp_dir / lock_file).exists():
-        if not image_spec.requirements:
-            raise ValueError("requirements must be set")
-        lock_path = tmp_dir / lock_file
-        shutil.copy2(image_spec.requirements, lock_path)
-
-    # If we haven't already copied pyproject.toml in _copy_local_packages_and_update_lock
-    if not (tmp_dir / "pyproject.toml").exists():
-        # lock requires pyproject.toml to be included
-        if not image_spec.requirements:
-            raise ValueError("requirements must be set")
-        dir_name = os.path.dirname(image_spec.requirements)
-
-        pyproject_toml_src = os.path.join(dir_name, "pyproject.toml")
-        if not os.path.exists(pyproject_toml_src):
-            msg = f"To use {lock_file}, a pyproject.toml file must be in the same directory as the lock file"
-            raise ValueError(msg)
-
-        shutil.copy2(pyproject_toml_src, tmp_dir / "pyproject.toml")
 
 
 def prepare_uv_lock_command(image_spec: ImageSpec, pip_install_args: List[str], tmp_dir: Path) -> str:
