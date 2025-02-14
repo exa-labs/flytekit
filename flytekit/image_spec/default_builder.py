@@ -91,7 +91,7 @@ id=micromamba \
 
 DOCKER_FILE_TEMPLATE = Template("""\
 #syntax=docker/dockerfile:1.5
-FROM ghcr.io/astral-sh/uv:0.5.1 as uv
+FROM ghcr.io/astral-sh/uv:0.5.31 as uv
 FROM mambaorg/micromamba:2.0.3-debian12-slim as micromamba
 
 FROM $BASE_IMAGE
