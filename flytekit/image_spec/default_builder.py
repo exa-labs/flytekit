@@ -165,6 +165,16 @@ def _is_flytekit(package: str) -> bool:
     return name == "flytekit"
 
 
+def _find_git_root(start_path: str):
+    """Find the root directory of the git repository."""
+    current = Path(start_path).resolve()
+
+    while current != current.parent:
+        if (current / ".git").exists():
+            return current
+        current = current.parent
+
+
 def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     """Copy local packages into the Docker build context and update their paths in the lock file."""
     if not image_spec.requirements or not os.path.basename(image_spec.requirements) == "uv.lock":
@@ -206,11 +216,13 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         if not package_path.exists():
             raise ValueError(f"Local package path does not exist: {package_path}")
 
+        git_root = _find_git_root(package_path)
+        if git_root is None:
+            raise ValueError(f"Could not find git root for {package_path}")
+
         # Get the relative path components and sanitize them
-        rel_path = os.path.relpath(package_path, start=lock_dir)
-        # Remove any parent directory references
-        safe_path = Path(*(part for part in Path(rel_path).parts if part not in ("..", ".")))
-        target_path = local_packages_dir / safe_path
+        rel_path = os.path.relpath(path=package_path, start=git_root)
+        target_path = local_packages_dir / rel_path
 
         # Create parent directories if they don't exist
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -223,7 +235,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
         # Update the paths in both files
         old_path = source[source_type]
-        new_path = f"/root/local_packages/{safe_path}"  # Use absolute path in container
+        new_path = f"/root/local_packages/{rel_path}"
         lock_content = lock_content.replace(f'{source_type} = "{old_path}"', f'{source_type} = "{new_path}"')
         pyproject_content = pyproject_content.replace(f'path = "{old_path}"', f'path = "{new_path}"')
 
@@ -398,7 +410,10 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
         ignore = IgnoreGroup(image_spec.source_root, [GitIgnore, DockerIgnore, StandardIgnore])
 
         ls, _ = ls_files(
-            str(image_spec.source_root), image_spec.source_copy_mode, deref_symlinks=False, ignore_group=ignore
+            str(image_spec.source_root),
+            image_spec.source_copy_mode,
+            deref_symlinks=False,
+            ignore_group=ignore,
         )
 
         for file_to_copy in ls:
