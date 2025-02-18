@@ -356,12 +356,22 @@ class FileAccessProvider(object):
             raise oe
 
     @retry_request
-    async def _put(self, from_path: str, to_path: str, recursive: bool = False, **kwargs):
+    async def _put(
+        self,
+        from_path: str,
+        to_path: str,
+        recursive: bool = False,
+        filesystem_kwargs: typing.Optional[dict] = None,
+        **kwargs,
+    ):
         """
         More of an internal function to be called by put_data and put_raw_data
         This does not need a separate sync function.
         """
-        file_system = await self.get_async_filesystem_for_path(to_path)
+        if filesystem_kwargs is None:
+            file_system = await self.get_async_filesystem_for_path(to_path, anonymous=False)
+        else:
+            file_system = await self.get_async_filesystem_for_path(to_path, anonymous=False, **filesystem_kwargs)
         from_path = self.strip_file_header(from_path)
         if recursive:
             # Only check this for the local filesystem
@@ -633,7 +643,12 @@ class FileAccessProvider(object):
     get_data = loop_manager.synced(async_get_data)
 
     async def async_put_data(
-        self, local_path: Union[str, os.PathLike], remote_path: str, is_multipart: bool = False, **kwargs
+        self,
+        local_path: Union[str, os.PathLike],
+        remote_path: str,
+        is_multipart: bool = False,
+        filesystem_kwargs: typing.Optional[dict] = None,
+        **kwargs,
     ) -> str:
         """
         The implication here is that we're always going to put data to the remote location, so we .remote to ensure
@@ -646,7 +661,13 @@ class FileAccessProvider(object):
         try:
             local_path = str(local_path)
             with timeit(f"Upload data to {remote_path}"):
-                put_result = await self._put(cast(str, local_path), remote_path, recursive=is_multipart, **kwargs)
+                put_result = await self._put(
+                    cast(str, local_path),
+                    remote_path,
+                    recursive=is_multipart,
+                    filesystem_kwargs=filesystem_kwargs,
+                    **kwargs,
+                )
                 # This is an unfortunate workaround to ensure that we return the correct path for the remote location
                 # Callers of this put_data function in flytekit have been changed to assign the remote path to the
                 # output

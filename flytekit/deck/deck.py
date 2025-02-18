@@ -194,13 +194,23 @@ def _output_deck(task_name: str, new_user_params: ExecutionParameters):
             f.write(_get_deck(new_user_params=new_user_params, ignore_jupyter=True))
         logger.info(f"{task_name} task creates flyte deck html to file://{local_path}")
         if ctx.execution_state.mode == ExecutionState.Mode.TASK_EXECUTION:
-            fs = ctx.file_access.get_filesystem_for_path(new_user_params.output_metadata_prefix)
+            fs = ctx.file_access.get_filesystem_for_path(new_user_params.output_metadata_prefix, anonymous=False)
             remote_path = f"{new_user_params.output_metadata_prefix}{ctx.file_access.sep(fs)}{DECK_FILE_NAME}"
             kwargs: typing.Dict[str, str] = {
                 "ContentType": "text/html",  # For s3
                 "content_type": "text/html",  # For gcs
             }
-            ctx.file_access.put_data(local_path, remote_path, **kwargs)
+            filesystem_kwargs = {
+                "key": os.getenv("DIRECT_AWS_ACCESS_KEY_ID"),
+                "secret": os.getenv("DIRECT_AWS_SECRET_ACCESS_KEY"),
+                "client_kwargs": {
+                    "endpoint_url": os.getenv("DIRECT_AWS_ENDPOINT_URL"),
+                },
+            }
+
+            ctx.file_access.put_data(
+                local_path, remote_path, is_multipart=False, filesystem_kwargs=filesystem_kwargs, **kwargs
+            )
     except Exception as e:
         logger.error(f"Failed to write flyte deck html with error {e}.")
 
