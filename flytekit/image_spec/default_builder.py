@@ -240,6 +240,8 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         old_path = source[source_type]
         new_path = f"/root/local_packages/{rel_path}"
         lock_content = lock_content.replace(f'{source_type} = "{old_path}"', f'{source_type} = "{new_path}"')
+        lock_content = lock_content.replace(f'directory = "{old_path}"', f'directory = "{new_path}"')
+        lock_content = lock_content.replace(f'editable = "{old_path}"', f'editable = "{new_path}"')
         pyproject_content = pyproject_content.replace(f'path = "{old_path}"', f'path = "{new_path}"')
 
     # Write the updated files
