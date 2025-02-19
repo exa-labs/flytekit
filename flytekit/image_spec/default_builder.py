@@ -211,6 +211,9 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         else:
             continue
 
+        if source[source_type] == ".":
+            continue
+
         # Get the absolute path of the package
         package_path = (lock_dir / source[source_type]).resolve()
         if not package_path.exists():

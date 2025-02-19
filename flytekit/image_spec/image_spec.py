@@ -172,7 +172,12 @@ class ImageSpec:
                 raise ValueError(f"Field source_root for image spec {self.name} must be set when copy is set")
 
             # Imports of flytekit.tools are circular
-            from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
+            from flytekit.tools.ignore import (
+                DockerIgnore,
+                GitIgnore,
+                IgnoreGroup,
+                StandardIgnore,
+            )
             from flytekit.tools.script_mode import ls_files
 
             # todo: we should pipe through ignores from the command line here at some point.
@@ -180,7 +185,10 @@ class ImageSpec:
             ignore = IgnoreGroup(self.source_root, [GitIgnore, DockerIgnore, StandardIgnore])
 
             _, ls_digest = ls_files(
-                str(self.source_root), self.source_copy_mode, deref_symlinks=False, ignore_group=ignore
+                str(self.source_root),
+                self.source_copy_mode,
+                deref_symlinks=False,
+                ignore_group=ignore,
             )
 
             # Since the source root is supposed to represent the files, store the digest into the source root as a
@@ -210,13 +218,20 @@ class ImageSpec:
                     source = package.get("source", {})
                     if source:
                         if "directory" in source:
+                            path = source["directory"]
+                            if path == ".":
+                                continue
                             # Hash the directory contents
-                            dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / source["directory"]
+                            dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
                             dir_hash = compute_digest(dir_path)
                             hasher.update(dir_hash.encode())
                         elif "editable" in source:
+                            path = source["editable"]
+                            if path == ".":
+                                continue
+
                             # Hash the editable package directory
-                            edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / source["editable"]
+                            edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
                             edit_hash = compute_digest(edit_path)
                             hasher.update(edit_hash.encode())
 
