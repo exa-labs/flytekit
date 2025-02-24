@@ -92,6 +92,7 @@ class ImageSpec:
     source_copy_mode: Optional[CopyFileDetection] = None
     copy: Optional[List[str]] = None
     python_exec: Optional[str] = None
+    install_project: Optional[bool] = False
 
     def __post_init__(self):
         self.name = self.name.lower()
@@ -219,7 +220,7 @@ class ImageSpec:
                     if source:
                         if "directory" in source:
                             path = source["directory"]
-                            if path == ".":
+                            if path == "." and not spec.install_project:
                                 continue
                             # Hash the directory contents
                             dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
@@ -227,7 +228,7 @@ class ImageSpec:
                             hasher.update(dir_hash.encode())
                         elif "editable" in source:
                             path = source["editable"]
-                            if path == ".":
+                            if path == "." and not spec.install_project:
                                 continue
 
                             # Hash the editable package directory

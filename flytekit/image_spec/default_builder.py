@@ -211,7 +211,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         else:
             continue
 
-        if source[source_type] == ".":
+        if source[source_type] == "." and not image_spec.install_project:
             continue
 
         # Get the absolute path of the package
@@ -271,7 +271,10 @@ def prepare_uv_lock_command(image_spec: ImageSpec, pip_install_args: List[str], 
     # --locked: Assert that the `uv.lock` will remain unchanged
     # --no-dev: Omit the development dependency group
     # --no-install-project: Do not install the current project
-    pip_install_args.extend(["--locked", "--no-dev", "--no-install-project"])
+    if image_spec.install_project:
+        pip_install_args.extend(["--locked", "--no-dev"])
+    else:
+        pip_install_args.extend(["--locked", "--no-dev", "--no-install-project"])
     pip_install_args_str = " ".join(pip_install_args)
 
     return UV_LOCK_INSTALL_TEMPLATE.substitute(PIP_INSTALL_ARGS=pip_install_args_str)
