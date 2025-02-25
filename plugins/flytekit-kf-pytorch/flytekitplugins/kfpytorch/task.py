@@ -359,7 +359,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         """
         try:
             from torch.distributed import run
-            from torch.distributed.launcher.api import LaunchConfig, elastic_launch, run
+            from torch.distributed.launcher.api import LaunchConfig, elastic_launch
         except ImportError:
             raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
 
