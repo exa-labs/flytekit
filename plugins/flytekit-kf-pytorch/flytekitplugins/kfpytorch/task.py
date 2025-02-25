@@ -18,7 +18,10 @@ from flytekit.configuration import SerializationSettings
 from flytekit.core.context_manager import FlyteContextManager, OutputMetadata
 from flytekit.core.pod_template import PodTemplate
 from flytekit.core.resources import convert_resources_to_resource_model
-from flytekit.exceptions.user import FlyteRecoverableException, FlyteUserRuntimeException
+from flytekit.exceptions.user import (
+    FlyteRecoverableException,
+    FlyteUserRuntimeException,
+)
 from flytekit.extend import IgnoreOutputs, TaskPlugins
 from flytekit.loggers import logger
 
@@ -194,6 +197,8 @@ class PyTorchFunctionTask(PythonFunctionTask[PyTorch]):
                 self.pod_template = PodTemplate()
             add_shared_mem_volume_to_pod_template(self.pod_template)
 
+        self._task_config = task_config
+
     def _convert_replica_spec(
         self, replica_config: Union[Master, Worker]
     ) -> pytorch_task.DistributedPyTorchTrainingReplicaSpec:
@@ -210,17 +215,17 @@ class PyTorchFunctionTask(PythonFunctionTask[PyTorch]):
         )
 
     def get_custom(self, settings: SerializationSettings) -> Dict[str, Any]:
-        worker = self._convert_replica_spec(self.task_config.worker)
+        worker = self._convert_replica_spec(self._task_config.worker)
         # support v0 config for backwards compatibility
-        if self.task_config.num_workers:
-            worker.replicas = self.task_config.num_workers
+        if self._task_config.num_workers:
+            worker.replicas = self._task_config.num_workers
 
         run_policy = (
-            _convert_run_policy_to_flyte_idl(self.task_config.run_policy) if self.task_config.run_policy else None
+            _convert_run_policy_to_flyte_idl(self._task_config.run_policy) if self._task_config.run_policy else None
         )
         pytorch_job = pytorch_task.DistributedPyTorchTrainingTask(
             worker_replicas=worker,
-            master_replicas=self._convert_replica_spec(self.task_config.master),
+            master_replicas=self._convert_replica_spec(self._task_config.master),
             run_policy=run_policy,
         )
         return MessageToDict(pytorch_job)
@@ -310,7 +315,8 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     _ELASTIC_TASK_TYPE_STANDALONE = "python-task"
 
     def __init__(self, task_config: Elastic, task_function: Callable, **kwargs):
-        task_type = self._ELASTIC_TASK_TYPE_STANDALONE if task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
+        # task_type = self._ELASTIC_TASK_TYPE_STANDALONE if task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
+        task_type = self._ELASTIC_TASK_TYPE
 
         super(PytorchElasticFunctionTask, self).__init__(
             task_config=task_config,
@@ -320,12 +326,6 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             task_type_version=1,
             **kwargs,
         )
-        try:
-            from torch.distributed import run
-        except ImportError:
-            raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
-        self.min_nodes, self.max_nodes = run.parse_min_max_nnodes(str(self.task_config.nnodes))
-
         """
         c10d is the backend recommended by torch elastic.
         https://pytorch.org/docs/stable/elastic/run.html#note-on-rendezvous-backend
@@ -340,6 +340,8 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             if self.pod_template is None:
                 self.pod_template = PodTemplate()
             add_shared_mem_volume_to_pod_template(self.pod_template)
+
+        self._task_config = task_config
 
     def _execute(self, **kwargs) -> Any:
         """
@@ -356,15 +358,18 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             IgnoreOutputs: Raised when the task is successful in any worker group with index > 0.
         """
         try:
-            from torch.distributed.launcher.api import LaunchConfig, elastic_launch
+            from torch.distributed import run
+            from torch.distributed.launcher.api import LaunchConfig, elastic_launch, run
         except ImportError:
             raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
 
         dist_env_vars_set = os.environ.get("PET_NNODES") is not None
-        if not dist_env_vars_set and self.min_nodes > 1:
+        min_nodes, max_nodes = run.parse_min_max_nnodes(str(self._task_config.nnodes))
+
+        if not dist_env_vars_set and min_nodes > 1:
             logger.warning(
                 (
-                    f"`nnodes` is set to {self.task_config.nnodes} in elastic task but execution appears "
+                    f"`nnodes` is set to {self._task_config.nnodes} in elastic task but execution appears "
                     "to not run in a `PyTorchJob`. Rendezvous might timeout."
                 )
             )
@@ -372,7 +377,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         # If OMP_NUM_THREADS is not set, set it to 1 to avoid overloading the system.
         # Doing so to copy the default behavior of torchrun.
         # See https://github.com/pytorch/pytorch/blob/eea4ece256d74c6f25c1f4eab37b3f2f4aeefd4d/torch/distributed/run.py#L791
-        if "OMP_NUM_THREADS" not in os.environ and self.task_config.nproc_per_node > 1:
+        if "OMP_NUM_THREADS" not in os.environ and self._task_config.nproc_per_node > 1:
             omp_num_threads = 1
             logger.warning(
                 "\n*****************************************\n"
@@ -387,18 +392,18 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
 
         config = LaunchConfig(
             run_id=flytekit.current_context().execution_id.name,
-            min_nodes=self.min_nodes,
-            max_nodes=self.max_nodes,
-            nproc_per_node=self.task_config.nproc_per_node,
+            min_nodes=min_nodes,
+            max_nodes=max_nodes,
+            nproc_per_node=self._task_config.nproc_per_node,
             rdzv_backend=self.rdzv_backend,  # rdzv settings
-            rdzv_configs=self.task_config.rdzv_configs,
+            rdzv_configs=self._task_config.rdzv_configs,
             rdzv_endpoint=os.environ.get("PET_RDZV_ENDPOINT", "localhost:0"),
-            max_restarts=self.task_config.max_restarts,
-            monitor_interval=self.task_config.monitor_interval,
-            start_method=self.task_config.start_method,
+            max_restarts=self._task_config.max_restarts,
+            monitor_interval=self._task_config.monitor_interval,
+            start_method=self._task_config.start_method,
         )
 
-        if self.task_config.start_method == "spawn":
+        if self._task_config.start_method == "spawn":
             """
             We use cloudpickle to serialize the non-pickleable task function.
             The torch elastic launcher then launches the spawn_helper function (which is pickleable)
@@ -425,7 +430,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
                 checkpoint_src,
                 kwargs,
             )
-        elif self.task_config.start_method == "fork":
+        elif self._task_config.start_method == "fork":
             """
             The torch elastic launcher doesn't support passing kwargs to the target function,
             only args. Flyte only works with kwargs. Thus, we create a closure which already has
@@ -506,7 +511,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         return self._execute(**kwargs)
 
     def get_custom(self, settings: SerializationSettings) -> Optional[Dict[str, Any]]:
-        if self.task_config.nnodes == 1:
+        if self._task_config.nnodes == 1:
             """
             Torch elastic distributed training is executed in a normal k8s pod so that this
             works without the kubeflow train operator.
@@ -515,19 +520,26 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         else:
             from flyteidl.plugins.kubeflow.pytorch_pb2 import ElasticConfig
 
+            try:
+                from torch.distributed import run
+            except ImportError:
+                raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
+
+            min_nodes, max_nodes = run.parse_min_max_nnodes(str(self._task_config.nnodes))
+
             elastic_config = ElasticConfig(
                 rdzv_backend=self.rdzv_backend,
-                min_replicas=self.min_nodes,
-                max_replicas=self.max_nodes,
-                nproc_per_node=self.task_config.nproc_per_node,
-                max_restarts=self.task_config.max_restarts,
+                min_replicas=min_nodes,
+                max_replicas=max_nodes,
+                nproc_per_node=self._task_config.nproc_per_node,
+                max_restarts=self._task_config.max_restarts,
             )
             run_policy = (
-                _convert_run_policy_to_flyte_idl(self.task_config.run_policy) if self.task_config.run_policy else None
+                _convert_run_policy_to_flyte_idl(self._task_config.run_policy) if self._task_config.run_policy else None
             )
             job = pytorch_task.DistributedPyTorchTrainingTask(
                 worker_replicas=pytorch_task.DistributedPyTorchTrainingReplicaSpec(
-                    replicas=self.max_nodes,
+                    replicas=max_nodes,
                 ),
                 elastic_config=elastic_config,
                 run_policy=run_policy,
