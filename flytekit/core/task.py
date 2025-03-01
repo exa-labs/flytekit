@@ -130,6 +130,7 @@ if TYPE_CHECKING:
         pod_template_name: Optional[str] = ...,
         accelerator: Optional[BaseAccelerator] = ...,
         pickle_untyped: bool = ...,
+        direct_s3: bool = ...,
     ) -> Callable[[Callable[P, FuncOut]], Callable[P, FuncOut]]: ...
 
     @overload
@@ -168,6 +169,7 @@ if TYPE_CHECKING:
         pod_template_name: Optional[str] = ...,
         accelerator: Optional[BaseAccelerator] = ...,
         pickle_untyped: bool = ...,
+        direct_s3: bool = ...,
     ) -> Callable[P, FuncOut]: ...
 
 else:
@@ -208,6 +210,7 @@ else:
         pod_template_name: Optional[str] = ...,
         accelerator: Optional[BaseAccelerator] = ...,
         pickle_untyped: bool = ...,
+        direct_s3: bool = ...,
     ) -> Callable[[Callable[P, FuncOut]], PythonFunctionTask[T]]: ...
 
     @overload
@@ -246,6 +249,7 @@ else:
         pod_template_name: Optional[str] = ...,
         accelerator: Optional[BaseAccelerator] = ...,
         pickle_untyped: bool = ...,
+        direct_s3: bool = ...,
     ) -> PythonFunctionTask[T]: ...
 
 
@@ -290,6 +294,7 @@ def task(
     pod_template_name: Optional[str] = None,
     accelerator: Optional[BaseAccelerator] = None,
     pickle_untyped: bool = False,
+    direct_s3: bool = False,
 ) -> Union[
     Callable[P, FuncOut],
     Callable[[Callable[P, FuncOut]], PythonFunctionTask[T]],
@@ -421,9 +426,16 @@ def task(
     :param pod_template_name: The name of the existing PodTemplate resource which will be used in this task.
     :param accelerator: The accelerator to use for this task.
     :param pickle_untyped: Boolean that indicates if the task allows unspecified data types.
+    :param direct_s3: Boolean that indicates if the task should use direct S3 access.
     """
 
     def wrapper(fn: Callable[P, Any]) -> PythonFunctionTask[T]:
+        if direct_s3 and "DIRECT_AWS_ACCESS_KEY_ID" in os.environ:
+            os.environ["AWS_ACCESS_KEY_ID"] = os.environ["DIRECT_AWS_ACCESS_KEY_ID"]
+            os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ["DIRECT_AWS_SECRET_ACCESS_KEY"]
+            os.environ["AWS_ENDPOINT_URL"] = os.environ["DIRECT_AWS_ENDPOINT_URL"]
+            os.environ["FLYTE_AWS_ENDPOINT"] = os.environ["DIRECT_AWS_ENDPOINT_URL"]
+
         _metadata = TaskMetadata(
             cache=cache,
             cache_serialize=cache_serialize,
