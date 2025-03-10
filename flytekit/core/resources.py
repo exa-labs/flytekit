@@ -108,6 +108,7 @@ def pod_spec_from_resources(
     limits: Optional[Resources] = None,
     k8s_gpu_resource_key: str = "nvidia.com/gpu",
     node_selector: Optional[Dict[str, str]] = None,
+    tolerations: Optional[List[V1Toleration]] = None,
 ) -> V1PodSpec:
     def _construct_k8s_pods_resources(resources: Optional[Resources], k8s_gpu_resource_key: str):
         if resources is None:
@@ -131,16 +132,22 @@ def pod_spec_from_resources(
 
     requests = _construct_k8s_pods_resources(resources=requests, k8s_gpu_resource_key=k8s_gpu_resource_key)
     limits = _construct_k8s_pods_resources(resources=limits, k8s_gpu_resource_key=k8s_gpu_resource_key)
+
+    # Initialize tolerations to empty list if None
+    if tolerations is None:
+        tolerations = []
+
     requests = requests or limits
     limits = limits or requests
 
-    tolerations = None
     if node_selector:
         cluster_name = node_selector.get("cluster", None)
-        if cluster_name and cluster_name == "aws":
-            tolerations = [
+        instance_type = node_selector.get("instance_type", None)
+
+        if (cluster_name and cluster_name == "aws") or instance_type:
+            tolerations.append(
                 V1Toleration(key="cloud", operator="Equal", value="aws", effect="NoSchedule"),
-            ]
+            )
 
     pod_spec = V1PodSpec(
         containers=[
