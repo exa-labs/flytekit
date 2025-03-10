@@ -1,7 +1,7 @@
 from dataclasses import dataclass, fields
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
-from kubernetes.client import V1Container, V1PodSpec, V1ResourceRequirements
+from kubernetes.client import V1Container, V1PodSpec, V1ResourceRequirements, V1Toleration
 from mashumaro.mixins.json import DataClassJSONMixin
 
 from flytekit.models import task as task_models
@@ -107,6 +107,7 @@ def pod_spec_from_resources(
     requests: Optional[Resources] = None,
     limits: Optional[Resources] = None,
     k8s_gpu_resource_key: str = "nvidia.com/gpu",
+    node_selector: Optional[Dict[str, str]] = None,
 ) -> V1PodSpec:
     def _construct_k8s_pods_resources(resources: Optional[Resources], k8s_gpu_resource_key: str):
         if resources is None:
@@ -133,6 +134,14 @@ def pod_spec_from_resources(
     requests = requests or limits
     limits = limits or requests
 
+    tolerations = None
+    if node_selector:
+        cluster_name = node_selector.get("cluster", None)
+        if cluster_name and cluster_name == "aws":
+            tolerations = [
+                V1Toleration(key="cloud", operator="Equal", value="aws", effect="NoSchedule"),
+            ]
+
     pod_spec = V1PodSpec(
         containers=[
             V1Container(
@@ -142,7 +151,9 @@ def pod_spec_from_resources(
                     limits=limits,
                 ),
             )
-        ]
+        ],
+        node_selector=node_selector,
+        tolerations=tolerations,
     )
 
     return pod_spec
