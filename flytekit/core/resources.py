@@ -110,7 +110,7 @@ def pod_spec_from_resources(
     node_selector: Optional[Dict[str, str]] = None,
     tolerations: Optional[List[V1Toleration]] = None,
     host_network: bool = False,
-    dns_policy: Optional[str] = None,
+    dns_policy: Optional[str] = "ClusterFirst",
 ) -> V1PodSpec:
     def _construct_k8s_pods_resources(resources: Optional[Resources], k8s_gpu_resource_key: str):
         if resources is None:
