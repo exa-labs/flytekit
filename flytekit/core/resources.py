@@ -109,6 +109,8 @@ def pod_spec_from_resources(
     k8s_gpu_resource_key: str = "nvidia.com/gpu",
     node_selector: Optional[Dict[str, str]] = None,
     tolerations: Optional[List[V1Toleration]] = None,
+    host_network: bool = False,
+    dns_policy: Optional[str] = None,
 ) -> V1PodSpec:
     def _construct_k8s_pods_resources(resources: Optional[Resources], k8s_gpu_resource_key: str):
         if resources is None:
@@ -145,11 +147,14 @@ def pod_spec_from_resources(
         instance_type = node_selector.get("instance_type", None)
 
         if (cluster_name and cluster_name == "aws") or instance_type:
+            dns_policy = "Default"
             tolerations.append(
                 V1Toleration(key="cloud", operator="Equal", value="aws", effect="NoSchedule"),
             )
 
     pod_spec = V1PodSpec(
+        host_network=host_network,
+        dns_policy=dns_policy,
         containers=[
             V1Container(
                 name=primary_container_name,
