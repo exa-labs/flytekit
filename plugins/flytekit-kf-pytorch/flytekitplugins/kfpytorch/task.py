@@ -315,8 +315,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     _ELASTIC_TASK_TYPE_STANDALONE = "python-task"
 
     def __init__(self, task_config: Elastic, task_function: Callable, **kwargs):
-        # task_type = self._ELASTIC_TASK_TYPE_STANDALONE if task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
-        task_type = self._ELASTIC_TASK_TYPE
+        task_type = self._ELASTIC_TASK_TYPE_STANDALONE if task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
 
         super(PytorchElasticFunctionTask, self).__init__(
             task_config=task_config,
@@ -363,21 +362,18 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         except ImportError:
             raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
 
-        dist_env_vars_set = os.environ.get("PET_NNODES") is not None
-        min_nodes, max_nodes = run.parse_min_max_nnodes(str(self._task_config.nnodes))
+        nnodes_str = os.environ.get("PET_NNODES", str(self._task_config.nnodes))
+        min_nodes, max_nodes = run.parse_min_max_nnodes(nnodes_str)
 
-        if not dist_env_vars_set and min_nodes > 1:
-            logger.warning(
-                (
-                    f"`nnodes` is set to {self._task_config.nnodes} in elastic task but execution appears "
-                    "to not run in a `PyTorchJob`. Rendezvous might timeout."
-                )
-            )
+        nproc_per_node = int(os.environ.get("PET_NPROC_PER_NODE", self._task_config.nproc_per_node))
+        max_restarts = int(os.environ.get("PET_MAX_RESTARTS", self._task_config.max_restarts))
+        monitor_interval = int(os.environ.get("PET_MONITOR_INTERVAL", self._task_config.monitor_interval))
+        rdzv_endpoint = os.environ.get("PET_RDZV_ENDPOINT", "localhost:0")
 
         # If OMP_NUM_THREADS is not set, set it to 1 to avoid overloading the system.
         # Doing so to copy the default behavior of torchrun.
         # See https://github.com/pytorch/pytorch/blob/eea4ece256d74c6f25c1f4eab37b3f2f4aeefd4d/torch/distributed/run.py#L791
-        if "OMP_NUM_THREADS" not in os.environ and self._task_config.nproc_per_node > 1:
+        if "OMP_NUM_THREADS" not in os.environ and nproc_per_node > 1:
             omp_num_threads = 1
             logger.warning(
                 "\n*****************************************\n"
@@ -394,12 +390,12 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             run_id=flytekit.current_context().execution_id.name,
             min_nodes=min_nodes,
             max_nodes=max_nodes,
-            nproc_per_node=self._task_config.nproc_per_node,
+            nproc_per_node=nproc_per_node,
             rdzv_backend=self.rdzv_backend,  # rdzv settings
             rdzv_configs=self._task_config.rdzv_configs,
-            rdzv_endpoint=os.environ.get("PET_RDZV_ENDPOINT", "localhost:0"),
-            max_restarts=self._task_config.max_restarts,
-            monitor_interval=self._task_config.monitor_interval,
+            rdzv_endpoint=rdzv_endpoint,
+            max_restarts=max_restarts,
+            monitor_interval=monitor_interval,
             start_method=self._task_config.start_method,
         )
 
