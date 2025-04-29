@@ -103,7 +103,7 @@ def convert_resources_to_resource_model(
 
 
 def pod_spec_from_resources(
-    primary_container_name: Optional[str] = None,
+    primary_container_name: str,
     requests: Optional[Resources] = None,
     limits: Optional[Resources] = None,
     k8s_gpu_resource_key: str = "nvidia.com/gpu",
