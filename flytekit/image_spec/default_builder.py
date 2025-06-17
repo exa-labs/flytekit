@@ -103,7 +103,7 @@ RUN --mount=from=micromamba,source=/etc/ssl/certs/ca-certificates.crt,target=/tm
     mkdir -p /etc/ssl/certs/ && cp /tmp/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 RUN id -u flytekit || useradd --create-home --shell /bin/bash flytekit
-RUN chown flytekit: /root && chown flytekit: /home
+RUN chown -R flytekit /root && chown -R flytekit /home
 
 $INSTALL_PYTHON_TEMPLATE
 
