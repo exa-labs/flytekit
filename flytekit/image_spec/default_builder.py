@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import warnings
@@ -24,17 +25,26 @@ from flytekit.tools.script_mode import ls_files
 
 UV_LOCK_INSTALL_TEMPLATE = Template(
     """\
-WORKDIR /root
 RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \
     --mount=from=uv,source=/uv,target=/usr/bin/uv \
     --mount=type=bind,target=uv.lock,src=uv.lock \
     --mount=type=bind,target=pyproject.toml,src=pyproject.toml \
     uv sync $PIP_INSTALL_ARGS
-WORKDIR /
 
 # Update PATH and UV_PYTHON to point to the venv created by uv sync
 ENV PATH="/root/.venv/bin:$$PATH" \
     UV_PYTHON=/root/.venv/bin/python
+"""
+)
+
+# Modified UV_LOCK_INSTALL_TEMPLATE that installs only local packages
+UV_LOCK_INSTALL_LOCAL_ONLY_TEMPLATE = Template(
+    """\
+# Install only local packages into existing venv
+RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \
+    --mount=from=uv,source=/uv,target=/usr/bin/uv \
+    --mount=type=bind,target=local_packages.txt,src=local_packages.txt \
+    uv pip install $PIP_INSTALL_ARGS --requirement local_packages.txt
 """
 )
 
@@ -111,13 +121,18 @@ $INSTALL_PYTHON_TEMPLATE
 ENV PATH="$EXTRA_PATH:$$PATH" \
     UV_PYTHON=$PYTHON_EXEC \
     UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
     FLYTE_SDK_RICH_TRACEBACKS=0 \
     SSL_CERT_DIR=/etc/ssl/certs \
     $ENV
 
+$UV_VENV_INSTALL
+
 $COPY_LOCAL_PACKAGES
 
 $UV_PYTHON_INSTALL_COMMAND
+
+WORKDIR /
 
 # Adds nvidia just in case it exists
 ENV PATH="$$PATH:/usr/local/nvidia/bin:/usr/local/cuda/bin" \
@@ -200,6 +215,9 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     local_packages_dir = tmp_dir / "local_packages"
     local_packages_dir.mkdir(exist_ok=True)
 
+    # Track local packages for separate installation
+    local_packages_list = []
+
     # Copy each local package from the lock file and update its path
     for package in lock_data["package"]:
         source = package["source"]
@@ -230,9 +248,25 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         # Create parent directories if they don't exist
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Copy the package to the build context
+        # Copy the package to the build context with ignore patterns
         if package_path.is_dir():
-            shutil.copytree(package_path, target_path, dirs_exist_ok=True)
+            # Set up ignore patterns for the package directory
+            ignore_group = IgnoreGroup(str(package_path), [GitIgnore, DockerIgnore, StandardIgnore])
+
+            # Get list of files to copy respecting ignore patterns
+            files_to_copy, _ = ls_files(
+                str(package_path),
+                CopyFileDetection.ALL,  # Copy all files that aren't ignored
+                deref_symlinks=False,
+                ignore_group=ignore_group,
+            )
+
+            # Copy each file individually
+            for file_to_copy in files_to_copy:
+                file_rel_path = os.path.relpath(file_to_copy, start=str(package_path))
+                file_target_path = target_path / file_rel_path
+                file_target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(file_to_copy, file_target_path)
         else:
             shutil.copy2(package_path, target_path)
 
@@ -244,12 +278,29 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         lock_content = lock_content.replace(f'editable = "{old_path}"', f'editable = "{new_path}"')
         pyproject_content = pyproject_content.replace(f'path = "{old_path}"', f'path = "{new_path}"')
 
+        # Add to local packages list
+        if source_type == "editable":
+            local_packages_list.append(f"-e {new_path}")
+        else:
+            local_packages_list.append(new_path)
+
     # Write the updated files
     lock_path = tmp_dir / "uv.lock"
     lock_path.write_text(lock_content)
 
     pyproject_path = tmp_dir / "pyproject.toml"
     pyproject_path.write_text(pyproject_content)
+
+    requirements_path = tmp_dir / "requirements.txt"
+
+    # Export requirements from uv.lock to requirements.txt format
+    # This excludes editable installs (-e) and local relative path dependencies
+    requirements_export_cmd = f"uv export --format requirements-txt | grep -v -E '^(-e|\\.\\./)' > {requirements_path}"
+    subprocess.run(requirements_export_cmd, shell=True, check=True)
+
+    # Write local packages file
+    local_packages_path = tmp_dir / "local_packages.txt"
+    local_packages_path.write_text("\n".join(local_packages_list))
 
 
 def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir: Path):
@@ -262,22 +313,15 @@ def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir
 
 
 def prepare_uv_lock_command(image_spec: ImageSpec, pip_install_args: List[str], tmp_dir: Path) -> str:
-    # uv sync is experimental, so our uv.lock support is also experimental
-    # the parameters we pass into install args could be different
     warnings.warn("uv.lock support is experimental", UserWarning)
 
     _copy_lock_files_into_context(image_spec, "uv.lock", tmp_dir)
 
-    # --locked: Assert that the `uv.lock` will remain unchanged
-    # --no-dev: Omit the development dependency group
-    # --no-install-project: Do not install the current project
-    if image_spec.install_project:
-        pip_install_args.extend(["--locked", "--no-dev"])
-    else:
-        pip_install_args.extend(["--locked", "--no-dev", "--no-install-project"])
+    # Use the same pip install args
     pip_install_args_str = " ".join(pip_install_args)
 
-    return UV_LOCK_INSTALL_TEMPLATE.substitute(PIP_INSTALL_ARGS=pip_install_args_str)
+    # Return template that only installs local packages
+    return UV_LOCK_INSTALL_LOCAL_ONLY_TEMPLATE.substitute(PIP_INSTALL_ARGS=pip_install_args_str)
 
 
 def prepare_poetry_lock_command(image_spec: ImageSpec, pip_install_args: List[str], tmp_dir: Path) -> str:
@@ -390,6 +434,9 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
         )
         raise ValueError(msg)
 
+    # Check if we're using uv.lock
+    is_uv_lock = image_spec.requirements and os.path.basename(image_spec.requirements) == "uv.lock"
+
     uv_python_install_command = prepare_python_install(image_spec, tmp_dir)
     env_dict = {"PYTHONPATH": "/root", _F_IMG_ID: image_spec.id}
 
@@ -477,6 +524,17 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
     else:
         copy_local_packages = ""
 
+    # Only include the uv venv install section if we're using uv.lock
+    if is_uv_lock:
+        uv_venv_install = """\
+WORKDIR /root
+RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
+    --mount=from=uv,source=/uv,target=/usr/bin/uv \\
+    --mount=type=bind,target=requirements.txt,src=requirements.txt \\
+    uv venv && uv pip sync requirements.txt"""
+    else:
+        uv_venv_install = ""
+
     docker_content = DOCKER_FILE_TEMPLATE.substitute(
         UV_PYTHON_INSTALL_COMMAND=uv_python_install_command,
         APT_INSTALL_COMMAND=apt_install_command,
@@ -490,6 +548,7 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
         RUN_COMMANDS=run_commands,
         EXTRA_COPY_CMDS=extra_copy_cmds,
         COPY_LOCAL_PACKAGES=copy_local_packages,
+        UV_VENV_INSTALL=uv_venv_install,
     )
 
     dockerfile_path = tmp_dir / "Dockerfile"
