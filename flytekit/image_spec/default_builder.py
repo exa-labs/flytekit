@@ -605,15 +605,25 @@ class DefaultImageBuilder(ImageSpecBuilder):
             tmp_path = Path(tmp_dir)
             create_docker_context(image_spec, tmp_path)
 
-            command = [
-                "docker",
-                "image",
-                "build",
-                "--tag",
-                f"{image_spec.image_name()}",
-                "--platform",
-                image_spec.platform,
-            ]
+            if image_spec.use_depot:
+                command = [
+                    "depot",
+                    "build",
+                    "--tag",
+                    f"{image_spec.image_name()}",
+                    "--platform",
+                    image_spec.platform,
+                ]
+            else:
+                command = [
+                    "docker",
+                    "image",
+                    "build",
+                    "--tag",
+                    f"{image_spec.image_name()}",
+                    "--platform",
+                    image_spec.platform,
+                ]
 
             if image_spec.registry and push:
                 command.append("--push")

@@ -65,6 +65,7 @@ class ImageSpec:
             If the option is set by the user, then that option is of course used.
         copy: List of files/directories to copy to /root. e.g. ["src/file1.txt", "src/file2.txt"]
         python_exec: Python executable to use for install packages
+        use_depot: Whether to use depot to build the image. If True, the image will be built using depot. If False, the image will be built using docker.
     """
 
     name: str = "flytekit"
@@ -93,6 +94,7 @@ class ImageSpec:
     copy: Optional[List[str]] = None
     python_exec: Optional[str] = None
     install_project: Optional[bool] = False
+    use_depot: Optional[bool] = True
 
     def __post_init__(self):
         self.name = self.name.lower()
