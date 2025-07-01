@@ -145,11 +145,17 @@ def pod_spec_from_resources(
     if node_selector:
         cluster_name = node_selector.get("cluster", None)
         instance_type = node_selector.get("instance_type", None)
+        capacity_type = node_selector.get("capacity_type", None)
 
-        if (cluster_name and cluster_name == "aws") or instance_type:
+        if (cluster_name and cluster_name == "aws") or instance_type or capacity_type:
             dns_policy = "Default"
             tolerations.append(
                 V1Toleration(key="cloud", operator="Equal", value="aws", effect="NoSchedule"),
+            )
+
+        if capacity_type == "spot":
+            tolerations.append(
+                V1Toleration(key="spot", operator="Equal", value="true", effect="NoSchedule"),
             )
 
     pod_spec = V1PodSpec(
