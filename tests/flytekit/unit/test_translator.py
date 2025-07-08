@@ -6,6 +6,7 @@ from flytekit import ContainerTask, Resources
 from flytekit.configuration import FastSerializationSettings, Image, ImageConfig
 from flytekit.core.base_task import kwtypes
 from flytekit.core.launch_plan import LaunchPlan, ReferenceLaunchPlan
+from flytekit.core.pod_template import PodTemplate
 from flytekit.core.reference_entity import ReferenceSpec, ReferenceTemplate
 from flytekit.core.task import ReferenceTask, task
 from flytekit.core.workflow import ReferenceWorkflow, workflow
@@ -183,3 +184,40 @@ def test_launch_plan_with_fixed_input():
     assert len(task_spec.template.interface.outputs) == 1
     assert len(task_spec.template.nodes) == 1
     assert len(task_spec.template.nodes[0].inputs) == 2
+
+
+def test_container_task_with_overrides():
+    """Test that ContainerTask with .with_overrides doesn't raise AttributeError on set_command_fn"""
+    # This test reproduces the exact issue from the user's bug report
+    dev_task = ContainerTask(
+        name="dev-task",
+        image="alpine:latest",
+        inputs=kwtypes(timeout=str),
+        command=["/bin/sh", "-c", "sleep {{.inputs.timeout}}"],
+    )
+
+    # Create a pod template
+    pod_template = PodTemplate()
+
+    # This should NOT raise AttributeError: 'ContainerTask' object has no attribute 'set_command_fn'
+    task_with_overrides = dev_task(
+        timeout="30"
+    ).with_overrides(
+        pod_template=pod_template,
+    )
+
+    # Set up serialization settings with fast serialization enabled
+    # This is what triggers the problematic code path
+    settings = (
+        serialization_settings.new_builder()
+        .with_fast_serialization_settings(FastSerializationSettings(enabled=True))
+        .build()
+    )
+
+    # Before the fix, this would raise AttributeError: 'ContainerTask' object has no attribute 'set_command_fn'
+    # After the fix, it should work without error
+    entity_mapping = OrderedDict()
+    serialized = get_serializable(entity_mapping, settings, task_with_overrides)
+
+    # Check that we got a valid result
+    assert serialized is not None

@@ -458,7 +458,10 @@ def get_serializable_node(
         # handle pod template overrides
         override_pod_spec = {}
         if entity._pod_template is not None and settings.should_fast_serialize():
-            entity.flyte_entity.set_command_fn(_fast_serialize_command_fn(settings, entity.flyte_entity))
+            # Only set command function if the entity is a PythonAutoContainerTask
+            # ContainerTask doesn't have set_command_fn method
+            if hasattr(entity.flyte_entity, 'set_command_fn'):
+                entity.flyte_entity.set_command_fn(_fast_serialize_command_fn(settings, entity.flyte_entity))
             override_pod_spec = _serialize_pod_spec(
                 entity._pod_template, entity.flyte_entity._get_container(settings), settings
             )
