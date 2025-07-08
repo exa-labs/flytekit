@@ -238,3 +238,36 @@ def test_container_task_image_spec(mock_image_spec_builder):
     pod = ct.get_k8s_pod(default_serialization_settings)
     assert pod.pod_spec["containers"][0]["image"] == image_spec_1.image_name()
     assert pod.pod_spec["containers"][1]["image"] == image_spec_2.image_name()
+
+
+def test_container_task_with_overrides():
+    """Test that ContainerTask with .with_overrides() works correctly and doesn't raise AttributeError."""
+    
+    # Create a container task like in the user's example
+    container_image = "alpine:latest"
+    
+    dev_task = ContainerTask(
+        name="dev-task",
+        image=container_image,
+        inputs=kwtypes(timeout=str),
+        command=["/bin/sh", "-c", "sleep {{.inputs.timeout}}"],
+    )
+    
+    # Create a pod template for the override
+    pod_template = PodTemplate()
+    
+    # Test calling the task with overrides - this should not raise an AttributeError
+    try:
+        result_task = dev_task(
+            timeout="30"
+        ).with_overrides(
+            pod_template=pod_template,
+        )
+        # The test passes if we get here without an AttributeError
+        assert result_task is not None
+    except AttributeError as e:
+        if "set_command_fn" in str(e):
+            pytest.fail(f"ContainerTask with_overrides still has the set_command_fn bug: {e}")
+        else:
+            # Re-raise if it's a different AttributeError
+            raise
