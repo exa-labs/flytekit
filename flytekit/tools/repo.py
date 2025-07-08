@@ -11,7 +11,9 @@ from rich import print as rprint
 
 from flytekit.configuration import FastSerializationSettings, ImageConfig, SerializationSettings
 from flytekit.constants import CopyFileDetection
-from flytekit.core.context_manager import FlyteContextManager
+from flytekit.core.context_manager import FlyteContextManager, FlyteEntities
+from flytekit.core.python_auto_container import PythonAutoContainerTask
+from flytekit.core.workflow import WorkflowBase
 from flytekit.loggers import logger
 from flytekit.models import launch_plan, task
 from flytekit.models.core.identifier import Identifier
@@ -309,7 +311,15 @@ def register(
         )
         serialization_settings.fast_serialization_settings = fast_serialization_settings
         if not version:
-            version = remote._version_from_hash(md5_bytes, serialization_settings, service_account, raw_data_prefix)  # noqa
+            # Extract image names from all loaded entities to include in version computation
+            image_names = []
+            for entity in FlyteEntities.entities.copy():
+                # Only extract image names from supported entity types
+                if entity is not None and isinstance(entity, (PythonAutoContainerTask, WorkflowBase)):
+                    image_names.extend(remote._get_image_names(entity))
+
+            # Compute version including image names, similar to register_script
+            version = remote._version_from_hash(md5_bytes, serialization_settings, None, *image_names)  # noqa
             serialization_settings.version = version
             click.secho(f"Computed version is {version}", fg="yellow")
 
