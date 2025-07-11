@@ -335,27 +335,31 @@ class JsonParamType(click.ParamType):
 
         def has_nested_dataclass(t: typing.Type) -> bool:
             """
-            Recursively checks whether the given type or its nested types contain any dataclass.
+            Recursively checks whether the given type or its nested types contain any dataclass or pydantic model.
 
             This function is typically called with a dictionary or list type and will return True if
-            any of the nested types within the dictionary or list is a dataclass.
+            any of the nested types within the dictionary or list is a dataclass or pydantic model.
 
             Note:
-            - A single dataclass will return True.
+            - A single dataclass or pydantic model will return True.
             - The function specifically excludes certain Flyte types like FlyteFile, FlyteDirectory,
             StructuredDataset, and FlyteSchema from being considered as dataclasses. This is because
             these types are handled separately by Flyte and do not need to be converted to dataclasses.
 
             Args:
-                t (typing.Type): The type to check for nested dataclasses.
+                t (typing.Type): The type to check for nested dataclasses or pydantic models.
 
             Returns:
-                bool: True if the type or its nested types contain a dataclass, False otherwise.
+                bool: True if the type or its nested types contain a dataclass or pydantic model, False otherwise.
             """
 
             if dataclasses.is_dataclass(t):
                 # FlyteTypes is not supported now, we can support it in the future.
                 return t not in FLYTE_TYPES
+            
+            # Also check for pydantic models
+            if is_pydantic_basemodel(t):
+                return True
 
             return any(has_nested_dataclass(arg) for arg in get_args(t))
 
