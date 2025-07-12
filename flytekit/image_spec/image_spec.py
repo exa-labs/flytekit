@@ -26,6 +26,85 @@ _F_IMG_ID = "_F_IMG_ID"
 FLYTE_FORCE_PUSH_IMAGE_SPEC = "FLYTE_FORCE_PUSH_IMAGE_SPEC"
 
 
+def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional[bool]:
+    """
+    Check if an image exists in ECR using AWS CLI.
+    
+    Args:
+        registry: ECR registry URL (e.g., "123456789012.dkr.ecr.us-east-1.amazonaws.com")
+        repository: Repository name (e.g., "my-app")
+        tag: Image tag
+        
+    Returns:
+        True if image exists, False if not, None if check failed
+    """
+    import subprocess
+    import json
+    
+    # Extract region from registry URL
+    match = re.match(r"(\d+)\.dkr\.ecr\.(.+?)\.amazonaws\.com", registry)
+    if not match:
+        return None
+    
+    account_id, region = match.groups()
+    
+    try:
+        # Use AWS CLI to check if image exists
+        cmd = [
+            "aws", "ecr", "describe-images",
+            "--repository-name", repository,
+            "--image-ids", f"imageTag={tag}",
+            "--region", region,
+            "--output", "json"
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            return len(data.get("imageDetails", [])) > 0
+        elif "ImageNotFoundException" in result.stderr or "RepositoryNotFoundException" in result.stderr:
+            return False
+        else:
+            # Some other error occurred
+            click.secho(f"Failed to check ECR image: {result.stderr}", fg="yellow")
+            return None
+            
+    except subprocess.TimeoutExpired:
+        click.secho("ECR check timed out", fg="yellow")
+        return None
+    except Exception as e:
+        click.secho(f"Failed to check ECR image: {e}", fg="yellow")
+        return None
+
+
+def is_ecr_registry(registry: str) -> bool:
+    """Check if a registry URL is an ECR registry."""
+    if not registry:
+        return False
+    return bool(re.match(r"\d+\.dkr\.ecr\..+\.amazonaws\.com", registry))
+
+
+def check_aws_cli_and_creds() -> bool:
+    """Check if AWS CLI is installed and credentials are configured."""
+    import subprocess
+    
+    try:
+        # Check if AWS CLI is installed
+        result = subprocess.run(["aws", "--version"], capture_output=True, timeout=5)
+        if result.returncode != 0:
+            return False
+            
+        # Check if credentials are configured
+        result = subprocess.run(["aws", "sts", "get-caller-identity"], capture_output=True, timeout=10)
+        return result.returncode == 0
+        
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    except Exception:
+        return False
+
+
 @dataclass
 class ImageSpec:
     """
@@ -279,6 +358,19 @@ class ImageSpec:
         Return True if the image exists in the registry, False otherwise.
         Return None if failed to check if the image exists due to the permission issue or other reasons.
         """
+        # Check if we should try ECR first
+        if self.registry and is_ecr_registry(self.registry) and check_aws_cli_and_creds():
+            click.secho(f"Checking ECR for image {self.image_name()}...", fg="blue")
+            ecr_result = check_ecr_image_exists(self.registry, self.name, self.tag)
+            if ecr_result is not None:
+                if ecr_result:
+                    click.secho(f"Image {self.image_name()} found in ECR.", fg="green")
+                else:
+                    click.secho(f"Image {self.image_name()} not found in ECR.", fg="yellow")
+                return ecr_result
+            # If ECR check failed, fall back to Docker
+            click.secho("ECR check failed, falling back to Docker check...", fg="yellow")
+        
         import docker
         from docker.errors import APIError, ImageNotFound
 
