@@ -55,7 +55,7 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
         cmd = [
             "aws", "ecr", "describe-images",
             "--repository-name", repository,
-            "--image-ids", f"imageTag={tag}",
+            "--image-ids", f'[{{"imageTag":"{tag}"}}]',
             "--region", region,
             "--output", "json"
         ]
