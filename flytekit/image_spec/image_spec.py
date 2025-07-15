@@ -51,11 +51,12 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
     click.secho(f"Extracted - Account ID: {account_id}, Region: {region}, Repository: {repository}, Tag: {tag}", fg="cyan")
     
     try:
-        # Use AWS CLI to check if image exists
+        # Use AWS CLI to check if image exists  
+        image_ids_json = json.dumps([{"imageTag": tag}])
         cmd = [
             "aws", "ecr", "describe-images",
             "--repository-name", repository,
-            "--image-ids", f'[{{"imageTag":"{tag}"}}]',
+            "--image-ids", image_ids_json,
             "--region", region,
             "--output", "json"
         ]
