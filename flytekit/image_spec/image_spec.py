@@ -71,12 +71,20 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
         if result.returncode == 0:
             data = json.loads(result.stdout)
             return len(data.get("imageDetails", [])) > 0
-        elif "ImageNotFoundException" in result.stderr or "RepositoryNotFoundException" in result.stderr:
-            return False
-        else:
-            # Some other error occurred
-            click.secho(f"Failed to check ECR image: {result.stderr}", fg="yellow")
-            return None
+        elif result.returncode != 0:
+            # Check for various image not found scenarios
+            if any(phrase in result.stderr for phrase in [
+                "ImageNotFoundException", 
+                "RepositoryNotFoundException",
+                "does not exist within the repository",
+                "does not exist in the repository"
+            ]):
+                click.secho(f"Image not found in ECR: {result.stderr}", fg="yellow")
+                return False
+            else:
+                # Some other error occurred
+                click.secho(f"Failed to check ECR image: {result.stderr}", fg="yellow")
+                return None
             
     except subprocess.TimeoutExpired:
         click.secho("ECR check timed out", fg="yellow")
