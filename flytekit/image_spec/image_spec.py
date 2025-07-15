@@ -44,9 +44,11 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
     # Extract region from registry URL
     match = re.match(r"(\d+)\.dkr\.ecr\.(.+?)\.amazonaws\.com", registry)
     if not match:
+        click.secho(f"Failed to parse ECR registry URL: {registry}", fg="red")
         return None
     
     account_id, region = match.groups()
+    click.secho(f"Extracted - Account ID: {account_id}, Region: {region}, Repository: {repository}, Tag: {tag}", fg="cyan")
     
     try:
         # Use AWS CLI to check if image exists
