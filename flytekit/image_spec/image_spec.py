@@ -58,7 +58,15 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
             "--output", "json"
         ]
         
+        # Output the command being executed
+        click.secho(f"Executing AWS ECR command: {' '.join(cmd)}", fg="blue")
+        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        # Output the raw result
+        click.secho(f"Raw stdout: {result.stdout}", fg="cyan")
+        click.secho(f"Raw stderr: {result.stderr}", fg="cyan")
+        click.secho(f"Return code: {result.returncode}", fg="cyan")
         
         if result.returncode == 0:
             data = json.loads(result.stdout)
