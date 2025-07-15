@@ -379,7 +379,15 @@ class ImageSpec:
         # Check if we should try ECR first
         if self.registry and is_ecr_registry(self.registry) and check_aws_cli_and_creds():
             click.secho(f"Checking ECR for image {self.image_name()}...", fg="blue")
-            ecr_result = check_ecr_image_exists(self.registry, self.name, self.tag)
+            # Extract repository name from registry - everything after the registry domain
+            registry_parts = self.registry.split('/', 1)
+            if len(registry_parts) > 1:
+                # Registry has a path: account.dkr.ecr.region.amazonaws.com/namespace
+                repository = f"{registry_parts[1]}/{self.name}"
+            else:
+                # Registry is just the domain: account.dkr.ecr.region.amazonaws.com
+                repository = self.name
+            ecr_result = check_ecr_image_exists(self.registry.split('/')[0], repository, self.tag)
             if ecr_result is not None:
                 if ecr_result:
                     click.secho(f"Image {self.image_name()} found in ECR.", fg="green")
