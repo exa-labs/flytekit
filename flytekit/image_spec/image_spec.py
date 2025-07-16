@@ -382,8 +382,13 @@ class ImageSpec:
         import docker
         from docker.errors import APIError, ImageNotFound
 
+        # Track if we can check with either Docker or AWS
+        docker_available = False
+        docker_error = None
+        
         try:
             client = docker.from_env()
+            docker_available = True
             if self.registry:
                 client.images.get_registry_data(self.image_name())
             else:
@@ -405,6 +410,7 @@ class ImageSpec:
         except ImageNotFound:
             return False
         except Exception as e:
+            docker_error = str(e)
             # if docker engine is not running locally, use requests to check if the image exists.
             if self.registry is None:
                 container_registry = None
@@ -434,6 +440,15 @@ class ImageSpec:
                     f"    pip install --upgrade docker"
                 )
 
+            # Check if we couldn't check with either Docker or AWS
+            if not docker_available and self.registry and is_ecr_registry(self.registry):
+                # For ECR registries, we need either Docker or AWS CLI
+                if not check_aws_cli_and_creds():
+                    raise RuntimeError(
+                        "Couldn't check if image exists, please make sure either you are using ECR "
+                        "and aws is properly logged in, or otherwise docker is installed and the daemon is accessible"
+                    )
+            
             click.secho(f"Failed to check if the image exists with error:\n {e}", fg="red")
             return None
 
