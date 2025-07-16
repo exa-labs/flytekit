@@ -28,6 +28,15 @@ class EnvdImageSpecBuilder(ImageSpecBuilder):
     """
 
     def build_image(self, image_spec: ImageSpec):
+        # Check if envd is available
+        import shutil
+        if not shutil.which("envd"):
+            raise RuntimeError(
+                "envd is not installed or not in PATH. "
+                "Please install envd (https://github.com/tensorchord/envd#installation) "
+                "or use a different builder (e.g., Docker) by setting builder='default'"
+            )
+        
         cfg_path = create_envd_config(image_spec)
 
         if image_spec.registry_config:
