@@ -405,24 +405,38 @@ class ImageSpec:
         except ImageNotFound:
             return False
         except Exception as e:
-            # if docker engine is not running locally, use requests to check if the image exists.
-            if self.registry is None:
-                container_registry = None
-            elif "localhost:" in self.registry:
-                container_registry = self.registry
-            elif "/" in self.registry:
-                container_registry = self.registry.split("/")[0]
-            else:
-                # Assume the image is in docker hub if users don't specify a registry, such as ghcr.io, docker.io.
-                container_registry = DOCKER_HUB
-            if container_registry == DOCKER_HUB:
-                url = f"https://hub.docker.com/v2/repositories/{self.registry}/{self.name}/tags/{self.tag}"
-                response = requests.get(url)
-                if response.status_code == 200:
-                    return True
-
-                if response.status_code == 404 and "not found" in str(response.content):
-                    return False
+            # Check if this is a Docker daemon unavailability issue
+            error_str = str(e).lower()
+            error_type = type(e).__name__
+            
+            # Specific patterns that indicate Docker daemon is not available
+            docker_unavailable_patterns = [
+                "no such file or directory",  # Socket file doesn't exist
+                "connection refused",         # Daemon not running on socket
+                "connection aborted",         # Connection failed
+                "cannot connect to the docker daemon",  # Explicit daemon connection error
+                "error while fetching server api version"  # Common docker-py error when daemon unavailable
+            ]
+            
+            # Check for specific exception types that indicate Docker unavailability
+            docker_unavailable_exceptions = [
+                "FileNotFoundError",  # Socket file not found
+                "ConnectionError",    # Connection related errors
+                "DockerException"     # Docker-py specific exceptions
+            ]
+            
+            is_docker_unavailable = (
+                any(pattern in error_str for pattern in docker_unavailable_patterns) or
+                error_type in docker_unavailable_exceptions or
+                ("docker daemon" in error_str and "running" in error_str)
+            )
+            
+            if is_docker_unavailable:
+                raise RuntimeError(
+                    f"Docker is not available to check image existence. "
+                    f"Error: {str(e)}\n"
+                    f"Please ensure Docker daemon is running and accessible."
+                )
 
             if "Not supported URL scheme http+docker" in str(e):
                 raise RuntimeError(
@@ -434,6 +448,8 @@ class ImageSpec:
                     f"    pip install --upgrade docker"
                 )
 
+            # For other errors that might be legitimate (e.g., permission issues, network timeouts),
+            # log the error but don't crash - return None to maintain backward compatibility
             click.secho(f"Failed to check if the image exists with error:\n {e}", fg="red")
             return None
 
