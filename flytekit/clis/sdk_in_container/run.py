@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import importlib
 import inspect
 import json
@@ -8,11 +9,16 @@ import sys
 import tempfile
 import typing
 import typing as t
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field, fields
 from typing import Iterator, get_args
 
 import rich_click as click
 import yaml
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 from click import Context
 from mashumaro.codecs.json import JSONEncoder
 from rich.progress import Progress, TextColumn, TimeElapsedColumn
@@ -957,7 +963,7 @@ class YamlFileReadingCommand(click.RichCommand):
                 ["--inputs-file"],
                 required=False,
                 type=click.Path(exists=True, dir_okay=False, resolve_path=True),
-                help="Path to a YAML | JSON file containing inputs for the workflow.",
+                help="Path to a YAML | JSON | TOML file containing inputs for the workflow.",
             )
         )
         super().__init__(name=name, params=params, callback=callback, help=help)
@@ -971,12 +977,18 @@ class YamlFileReadingCommand(click.RichCommand):
                 try:
                     inputs = json.loads(f)
                 except json.JSONDecodeError as e:
-                    raise click.BadParameter(
-                        message=f"Could not load the inputs file. Please make sure it is a valid JSON or YAML file."
-                        f"\n json error: {e},"
-                        f"\n yaml error: {yaml_e}",
-                        param_hint="--inputs-file",
-                    )
+                    json_e = e
+                    try:
+                        inputs = tomllib.loads(f)
+                    except Exception as e:
+                        toml_e = e
+                        raise click.BadParameter(
+                            message=f"Could not load the inputs file. Please make sure it is a valid JSON, YAML, or TOML file."
+                            f"\n json error: {json_e},"
+                            f"\n yaml error: {yaml_e},"
+                            f"\n toml error: {toml_e}",
+                            param_hint="--inputs-file",
+                        )
 
             return inputs
 
