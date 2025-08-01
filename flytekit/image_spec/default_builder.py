@@ -295,7 +295,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
     # Export requirements from uv.lock to requirements.txt format
     # This excludes editable installs (-e) and local relative path dependencies
-    requirements_export_cmd = rf"uv export --format requirements-txt | grep -v '^\(-e\|\.\./\)' > {requirements_path}"
+    requirements_export_cmd = rf"uv export --format requirements-txt {image_spec.uv_export_args} | grep -v '^\(-e\|\.\./\)' > {requirements_path}"
     subprocess.run(requirements_export_cmd, shell=True, check=True)
 
     # Write local packages file
@@ -603,6 +603,7 @@ class DefaultImageBuilder(ImageSpecBuilder):
 
         # Check if build tools are available
         import shutil
+
         if image_spec.use_depot:
             if not shutil.which("depot"):
                 raise RuntimeError(
@@ -615,7 +616,7 @@ class DefaultImageBuilder(ImageSpecBuilder):
                     "Docker is not installed or not in PATH. "
                     "Please install Docker (https://docs.docker.com/get-docker/) or use depot by setting use_depot=True"
                 )
-            
+
             # Check if Docker daemon is running
             try:
                 result = run(["docker", "info"], capture_output=True, text=True)

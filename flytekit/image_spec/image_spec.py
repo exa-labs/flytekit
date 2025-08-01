@@ -29,37 +29,43 @@ FLYTE_FORCE_PUSH_IMAGE_SPEC = "FLYTE_FORCE_PUSH_IMAGE_SPEC"
 def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional[bool]:
     """
     Check if an image exists in ECR using AWS CLI.
-    
+
     Args:
         registry: ECR registry URL (e.g., "123456789012.dkr.ecr.us-east-1.amazonaws.com")
         repository: Repository name (e.g., "my-app")
         tag: Image tag
-        
+
     Returns:
         True if image exists, False if not, None if check failed
     """
-    import subprocess
     import json
-    
+    import subprocess
+
     # Extract region from registry URL
     match = re.match(r"(\d+)\.dkr\.ecr\.(.+?)\.amazonaws\.com", registry)
     if not match:
         return None
-    
+
     account_id, region = match.groups()
-    
+
     try:
         # Use AWS CLI to check if image exists
         cmd = [
-            "aws", "ecr", "describe-images",
-            "--repository-name", repository,
-            "--image-ids", f"imageTag={tag}",
-            "--region", region,
-            "--output", "json"
+            "aws",
+            "ecr",
+            "describe-images",
+            "--repository-name",
+            repository,
+            "--image-ids",
+            f"imageTag={tag}",
+            "--region",
+            region,
+            "--output",
+            "json",
         ]
-        
+
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        
+
         if result.returncode == 0:
             data = json.loads(result.stdout)
             return len(data.get("imageDetails", [])) > 0
@@ -69,7 +75,7 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
             # Some other error occurred
             click.secho(f"Failed to check ECR image: {result.stderr}", fg="yellow")
             return None
-            
+
     except subprocess.TimeoutExpired:
         click.secho("ECR check timed out", fg="yellow")
         return None
@@ -88,17 +94,17 @@ def is_ecr_registry(registry: str) -> bool:
 def check_aws_cli_and_creds() -> bool:
     """Check if AWS CLI is installed and credentials are configured."""
     import subprocess
-    
+
     try:
         # Check if AWS CLI is installed
         result = subprocess.run(["aws", "--version"], capture_output=True, timeout=5)
         if result.returncode != 0:
             return False
-            
+
         # Check if credentials are configured
         result = subprocess.run(["aws", "sts", "get-caller-identity"], capture_output=True, timeout=10)
         return result.returncode == 0
-        
+
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
     except Exception:
@@ -145,6 +151,7 @@ class ImageSpec:
         copy: List of files/directories to copy to /root. e.g. ["src/file1.txt", "src/file2.txt"]
         python_exec: Python executable to use for install packages
         use_depot: Whether to use depot to build the image. If True, the image will be built using depot. If False, the image will be built using docker.
+        uv_export_args: Extra arguments to pass to uv export.
     """
 
     name: str = "flytekit"
@@ -174,6 +181,7 @@ class ImageSpec:
     python_exec: Optional[str] = None
     install_project: Optional[bool] = False
     use_depot: Optional[bool] = True
+    uv_export_args: str = ""
 
     def __post_init__(self):
         self.name = self.name.lower()
@@ -370,14 +378,14 @@ class ImageSpec:
                 return ecr_result
             # If ECR check failed, fall back to Docker
             click.secho("ECR check failed, falling back to Docker check...", fg="yellow")
-        
+
         import docker
         from docker.errors import APIError, ImageNotFound
 
         # Track if we can check with either Docker or AWS
         docker_available = False
         docker_error = None
-        
+
         try:
             client = docker.from_env()
             docker_available = True
@@ -440,7 +448,7 @@ class ImageSpec:
                         "Couldn't check if image exists, please make sure either you are using ECR "
                         "and aws is properly logged in, or otherwise docker is installed and the daemon is accessible"
                     )
-            
+
             click.secho(f"Failed to check if the image exists with error:\n {e}", fg="red")
             return None
 
