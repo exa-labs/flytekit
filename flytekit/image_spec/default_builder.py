@@ -295,7 +295,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
     # Export requirements from uv.lock to requirements.txt format
     # This excludes editable installs (-e) and local relative path dependencies
-    requirements_export_cmd = rf"uv export --format requirements-txt {image_spec.uv_export_args} | grep -v '^\(-e\|\.\./\)' > {requirements_path}"
+    requirements_export_cmd = rf"uv export --format requirements-txt {image_spec.uv_export_args or ""} | grep -v '^\(-e\|\.\./\)' > {requirements_path}"
     subprocess.run(requirements_export_cmd, shell=True, check=True)
 
     # Write local packages file
