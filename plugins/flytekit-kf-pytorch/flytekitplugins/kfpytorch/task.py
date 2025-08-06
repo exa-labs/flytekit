@@ -138,6 +138,17 @@ class Elastic(object):
     Please see https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html for potential performance improvements.
     To change `OMP_NUM_THREADS`, specify it in the environment dict of the flytekit task decorator or via `pyflyte run --env`.
 
+    .. note::
+
+        The task type (and execution backend) is dynamically determined based on the `nnodes` value:
+        
+        - When `nnodes=1`: Task runs as a standalone pod (task_type="python-task")
+        - When `nnodes>1`: Task runs as a PyTorchJob via Kubeflow operator (task_type="pytorch")
+        
+        This behavior is preserved even when using `with_overrides()` to change the task configuration.
+        For example, a task created with `nnodes=2` can be overridden to `nnodes=1` and will correctly
+        execute as a standalone pod instead of a PyTorchJob.
+
     Args:
         nnodes (Union[int, str]): Number of nodes, or the range of nodes in form <minimum_nodes>:<maximum_nodes>.
         nproc_per_node (str): Number of workers per node.
@@ -315,11 +326,19 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     _ELASTIC_TASK_TYPE_STANDALONE = "python-task"
 
     def __init__(self, task_config: Elastic, task_function: Callable, **kwargs):
-        task_type = self._ELASTIC_TASK_TYPE_STANDALONE if task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
+        # Store initial task type based on initial config
+        # Handle both int and string nnodes values
+        nnodes = task_config.nnodes
+        if isinstance(nnodes, int):
+            initial_task_type = self._ELASTIC_TASK_TYPE_STANDALONE if nnodes == 1 else self._ELASTIC_TASK_TYPE
+        else:
+            # For string values like "1:4", check if it's "1" or "1:1"
+            nnodes_str = str(nnodes)
+            initial_task_type = self._ELASTIC_TASK_TYPE_STANDALONE if nnodes_str in ["1", "1:1"] else self._ELASTIC_TASK_TYPE
 
         super(PytorchElasticFunctionTask, self).__init__(
             task_config=task_config,
-            task_type=task_type,
+            task_type=initial_task_type,
             task_function=task_function,
             # task_type_version controls the version of the task template, do not change
             task_type_version=1,
@@ -340,7 +359,24 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
                 self.pod_template = PodTemplate()
             add_shared_mem_volume_to_pod_template(self.pod_template)
 
-        self._task_config = task_config
+    @property
+    def task_type(self) -> str:
+        """
+        Dynamically determine task type based on current nnodes configuration.
+        This ensures that task type updates when task_config is overridden.
+        """
+        if self._task_config:
+            # Handle both int and string nnodes values
+            nnodes = self._task_config.nnodes
+            if isinstance(nnodes, int):
+                if nnodes == 1:
+                    return self._ELASTIC_TASK_TYPE_STANDALONE
+            else:
+                # For string values like "1:4", check if it's "1" or "1:1"
+                nnodes_str = str(nnodes)
+                if nnodes_str == "1" or nnodes_str == "1:1":
+                    return self._ELASTIC_TASK_TYPE_STANDALONE
+        return self._ELASTIC_TASK_TYPE
 
     def _execute(self, **kwargs) -> Any:
         """
@@ -507,7 +543,17 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         return self._execute(**kwargs)
 
     def get_custom(self, settings: SerializationSettings) -> Optional[Dict[str, Any]]:
-        if self._task_config.nnodes == 1:
+        # Check if this is a single-node configuration
+        nnodes = self._task_config.nnodes
+        is_single_node = False
+        if isinstance(nnodes, int):
+            is_single_node = (nnodes == 1)
+        else:
+            # For string values like "1:4", check if it's "1" or "1:1"
+            nnodes_str = str(nnodes)
+            is_single_node = nnodes_str in ["1", "1:1"]
+            
+        if is_single_node:
             """
             Torch elastic distributed training is executed in a normal k8s pod so that this
             works without the kubeflow train operator.
