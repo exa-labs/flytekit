@@ -320,6 +320,15 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     """
     Plugin for distributed training with torch elastic/torchrun (see
     https://pytorch.org/docs/stable/elastic/run.html).
+    
+    This task type dynamically adjusts its execution behavior based on the `nnodes` configuration:
+    
+    - When `nnodes=1`: Executes as a regular Python task without elastic launch, avoiding 
+      unnecessary overhead and rendezvous timeouts.
+    - When `nnodes>1`: Uses torch elastic launch for distributed execution across multiple nodes.
+    
+    This behavior is preserved even when using `with_overrides()` to change the configuration,
+    allowing seamless switching between single-node and multi-node execution modes.
     """
 
     _ELASTIC_TASK_TYPE = "pytorch"
@@ -539,7 +548,22 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
 
         Handles the exception scope for the `_execute` method.
         """
-
+        # Check if this is a single-node configuration
+        nnodes = self._task_config.nnodes
+        is_single_node = False
+        if isinstance(nnodes, int):
+            is_single_node = (nnodes == 1)
+        else:
+            # For string values like "1:4", check if it's "1" or "1:1"
+            nnodes_str = str(nnodes)
+            is_single_node = nnodes_str in ["1", "1:1"]
+        
+        # For single-node execution, bypass elastic launch and run directly
+        if is_single_node:
+            # Run as a regular Python task without elastic launch
+            return super().execute(**kwargs)
+        
+        # For multi-node execution, use elastic launch
         return self._execute(**kwargs)
 
     def get_custom(self, settings: SerializationSettings) -> Optional[Dict[str, Any]]:

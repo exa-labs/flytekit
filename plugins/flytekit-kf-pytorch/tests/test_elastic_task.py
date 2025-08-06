@@ -403,3 +403,45 @@ def test_elastic_task_type_with_string_nnodes():
     node = test_string_override_workflow.nodes[0]
     assert node.flyte_entity._task_config.nnodes == "1"
     assert node.flyte_entity.task_type == "python-task"
+
+
+def test_elastic_single_node_execution():
+    """Test that single-node tasks execute without elastic launch."""
+    import os
+    from unittest.mock import patch, MagicMock
+    
+    # Create a simple task function
+    def simple_task(x: int) -> int:
+        return x * 2
+    
+    # Test with nnodes=1 (should not use elastic_launch)
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=1))
+    def single_node_task(x: int) -> int:
+        return simple_task(x)
+    
+    # Mock elastic_launch to ensure it's not called
+    with patch('torch.distributed.launcher.api.elastic_launch') as mock_elastic_launch:
+        # Execute the task
+        result = single_node_task.execute(x=5)
+        
+        # Verify the result is correct
+        assert result == 10
+        
+        # Verify elastic_launch was NOT called
+        mock_elastic_launch.assert_not_called()
+    
+    # Test with nnodes=2 (should use elastic_launch)
+    @task(task_config=Elastic(nnodes=2, nproc_per_node=1))
+    def multi_node_task(x: int) -> int:
+        return simple_task(x)
+    
+    # Mock elastic_launch for multi-node case
+    mock_result = MagicMock()
+    mock_result.return_value = {0: MagicMock(return_value=20, decks=[], om=None)}
+    
+    with patch('torch.distributed.launcher.api.elastic_launch', return_value=mock_result) as mock_elastic_launch:
+        # Execute the task (this will use mocked elastic_launch)
+        result = multi_node_task.execute(x=10)
+        
+        # Verify elastic_launch WAS called for multi-node
+        mock_elastic_launch.assert_called_once()
