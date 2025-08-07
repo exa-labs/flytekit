@@ -177,6 +177,11 @@ class Elastic(object):
     increase_shared_mem: bool = True
     run_policy: Optional[RunPolicy] = None
 
+    def __repr__(self) -> str:
+        """String representation for better logging."""
+        return (f"Elastic(nnodes={self.nnodes}, nproc_per_node={self.nproc_per_node}, "
+                f"start_method={self.start_method}, max_restarts={self.max_restarts})")
+
 
 class PyTorchFunctionTask(PythonFunctionTask[PyTorch]):
     """
@@ -338,12 +343,16 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         # Store initial task type based on initial config
         # Handle both int and string nnodes values
         nnodes = task_config.nnodes
+        logger.info(f"PytorchElasticFunctionTask.__init__: nnodes={nnodes}, type={type(nnodes)}")
+        
         if isinstance(nnodes, int):
             initial_task_type = self._ELASTIC_TASK_TYPE_STANDALONE if nnodes == 1 else self._ELASTIC_TASK_TYPE
         else:
             # For string values like "1:4", check if it's "1" or "1:1"
             nnodes_str = str(nnodes)
             initial_task_type = self._ELASTIC_TASK_TYPE_STANDALONE if nnodes_str in ["1", "1:1"] else self._ELASTIC_TASK_TYPE
+        
+        logger.info(f"PytorchElasticFunctionTask.__init__: initial_task_type={initial_task_type}")
 
         super(PytorchElasticFunctionTask, self).__init__(
             task_config=task_config,
@@ -377,14 +386,20 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         if self._task_config:
             # Handle both int and string nnodes values
             nnodes = self._task_config.nnodes
+            logger.info(f"task_type property: checking nnodes={nnodes}, type={type(nnodes)}")
+            
             if isinstance(nnodes, int):
                 if nnodes == 1:
+                    logger.info(f"task_type property: returning STANDALONE (nnodes=1)")
                     return self._ELASTIC_TASK_TYPE_STANDALONE
             else:
                 # For string values like "1:4", check if it's "1" or "1:1"
                 nnodes_str = str(nnodes)
                 if nnodes_str == "1" or nnodes_str == "1:1":
+                    logger.info(f"task_type property: returning STANDALONE (nnodes_str={nnodes_str})")
                     return self._ELASTIC_TASK_TYPE_STANDALONE
+        
+        logger.info(f"task_type property: returning ELASTIC (multi-node)")
         return self._ELASTIC_TASK_TYPE
 
     def _execute(self, **kwargs) -> Any:
@@ -401,6 +416,9 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
                 inherit from `FlyteRecoverableException`.
             IgnoreOutputs: Raised when the task is successful in any worker group with index > 0.
         """
+        logger.info("_execute: Starting elastic launch execution")
+        logger.info(f"_execute: task_config.nnodes={self._task_config.nnodes}")
+        
         try:
             from torch.distributed import run
             from torch.distributed.launcher.api import LaunchConfig, elastic_launch
@@ -408,12 +426,17 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
 
         nnodes_str = os.environ.get("PET_NNODES", str(self._task_config.nnodes))
+        logger.info(f"_execute: PET_NNODES env var={os.environ.get('PET_NNODES')}, using nnodes_str={nnodes_str}")
         min_nodes, max_nodes = run.parse_min_max_nnodes(nnodes_str)
+        logger.info(f"_execute: parsed min_nodes={min_nodes}, max_nodes={max_nodes}")
 
         nproc_per_node = int(os.environ.get("PET_NPROC_PER_NODE", self._task_config.nproc_per_node))
         max_restarts = int(os.environ.get("PET_MAX_RESTARTS", self._task_config.max_restarts))
         monitor_interval = int(os.environ.get("PET_MONITOR_INTERVAL", self._task_config.monitor_interval))
         rdzv_endpoint = os.environ.get("PET_RDZV_ENDPOINT", "localhost:0")
+        
+        logger.info(f"_execute: nproc_per_node={nproc_per_node}, max_restarts={max_restarts}")
+        logger.info(f"_execute: monitor_interval={monitor_interval}, rdzv_endpoint={rdzv_endpoint}")
 
         # If OMP_NUM_THREADS is not set, set it to 1 to avoid overloading the system.
         # Doing so to copy the default behavior of torchrun.
@@ -443,6 +466,13 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             monitor_interval=monitor_interval,
             start_method=self._task_config.start_method,
         )
+        
+        logger.info(f"_execute: LaunchConfig created with:")
+        logger.info(f"  - min_nodes={min_nodes}, max_nodes={max_nodes}")
+        logger.info(f"  - nproc_per_node={nproc_per_node}")
+        logger.info(f"  - rdzv_backend={self.rdzv_backend}")
+        logger.info(f"  - rdzv_endpoint={rdzv_endpoint}")
+        logger.info(f"  - start_method={self._task_config.start_method}")
 
         if self._task_config.start_method == "spawn":
             """
@@ -548,25 +578,55 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
 
         Handles the exception scope for the `_execute` method.
         """
+        logger.info(f"PytorchElasticFunctionTask.execute called")
+        logger.info(f"Current task_config: {self._task_config}")
+        logger.info(f"Current task_type: {self.task_type}")
+        
+        # Log relevant environment variables
+        logger.info("Environment variables:")
+        logger.info(f"  - PET_NNODES: {os.environ.get('PET_NNODES', 'NOT SET')}")
+        logger.info(f"  - PET_NPROC_PER_NODE: {os.environ.get('PET_NPROC_PER_NODE', 'NOT SET')}")
+        logger.info(f"  - PET_RDZV_ENDPOINT: {os.environ.get('PET_RDZV_ENDPOINT', 'NOT SET')}")
+        logger.info(f"  - MASTER_ADDR: {os.environ.get('MASTER_ADDR', 'NOT SET')}")
+        logger.info(f"  - MASTER_PORT: {os.environ.get('MASTER_PORT', 'NOT SET')}")
+        
         # Check if this is a single-node configuration
         nnodes = self._task_config.nnodes
         is_single_node = False
         if isinstance(nnodes, int):
             is_single_node = (nnodes == 1)
+            logger.info(f"execute: nnodes is int={nnodes}, is_single_node={is_single_node}")
         else:
             # For string values like "1:4", check if it's "1" or "1:1"
             nnodes_str = str(nnodes)
             is_single_node = nnodes_str in ["1", "1:1"]
+            logger.info(f"execute: nnodes is str={nnodes_str}, is_single_node={is_single_node}")
         
         # For single-node execution, bypass elastic launch and run directly
         if is_single_node:
             # Run as a regular Python task without elastic launch
-            return super().execute(**kwargs)
+            logger.info("execute: Single-node detected, bypassing elastic launch and calling super().execute()")
+            try:
+                # Get parent class info
+                parent_class = super().__class__
+                logger.info(f"execute: Parent class is {parent_class}")
+                logger.info(f"execute: Calling {parent_class.__name__}.execute()")
+                result = super().execute(**kwargs)
+                logger.info(f"execute: Parent execute returned successfully")
+                return result
+            except Exception as e:
+                logger.error(f"execute: Error in parent execute: {type(e).__name__}: {e}")
+                raise
         
         # For multi-node execution, use elastic launch
+        logger.info("execute: Multi-node detected, calling _execute() with elastic launch")
         return self._execute(**kwargs)
 
     def get_custom(self, settings: SerializationSettings) -> Optional[Dict[str, Any]]:
+        logger.info("get_custom: Called for serialization")
+        logger.info(f"get_custom: Current task_type property returns: {self.task_type}")
+        logger.info(f"get_custom: settings={settings}")
+        
         # Check if this is a single-node configuration
         nnodes = self._task_config.nnodes
         is_single_node = False
@@ -576,14 +636,18 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             # For string values like "1:4", check if it's "1" or "1:1"
             nnodes_str = str(nnodes)
             is_single_node = nnodes_str in ["1", "1:1"]
+        
+        logger.info(f"get_custom: nnodes={nnodes}, is_single_node={is_single_node}")
             
         if is_single_node:
             """
             Torch elastic distributed training is executed in a normal k8s pod so that this
             works without the kubeflow train operator.
             """
+            logger.info("get_custom: Single-node configuration, returning super().get_custom()")
             return super().get_custom(settings)
         else:
+            logger.info("get_custom: Multi-node configuration, creating ElasticConfig")
             from flyteidl.plugins.kubeflow.pytorch_pb2 import ElasticConfig
 
             try:
