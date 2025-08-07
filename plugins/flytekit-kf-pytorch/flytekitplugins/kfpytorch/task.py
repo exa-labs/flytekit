@@ -342,6 +342,41 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
 
         self._task_config = task_config
 
+    # Add dynamic task_type based on current (possibly overridden) nnodes
+    @property
+    def task_type(self) -> str:
+        """Return task type dynamically so overrides to nnodes take effect at serialization time.
+        Single-node => "python-task"; multi-node => "pytorch".
+        """
+        # Avoid importing torch here; keep logic lightweight and resilient during serialization
+        n = self._task_config.nnodes
+        # Accept ints and simple strings like "1" or ranges like "1:1"
+        try:
+            # Fast path: integer equality
+            if isinstance(n, int):
+                return self._ELASTIC_TASK_TYPE_STANDALONE if n == 1 else self._ELASTIC_TASK_TYPE
+            # String handling
+            if isinstance(n, str):
+                s = n.strip()
+                if ":" in s:
+                    parts = s.split(":", 1)
+                    min_n = int(parts[0].strip())
+                    max_n = int(parts[1].strip())
+                    # Treat 1:1 as single-node; anything else as multi-node
+                    return (
+                        self._ELASTIC_TASK_TYPE_STANDALONE
+                        if min_n == 1 and max_n == 1
+                        else self._ELASTIC_TASK_TYPE
+                    )
+                # Plain numeric string
+                as_int = int(s)
+                return self._ELASTIC_TASK_TYPE_STANDALONE if as_int == 1 else self._ELASTIC_TASK_TYPE
+        except Exception:
+            # On any parsing issue, fall back to multi-node behavior (safe default)
+            return self._ELASTIC_TASK_TYPE
+        # Unknown type; default to multi-node
+        return self._ELASTIC_TASK_TYPE
+
     def _execute(self, **kwargs) -> Any:
         """
         Execute the task function using torch distributed's `elastic_launch`.
