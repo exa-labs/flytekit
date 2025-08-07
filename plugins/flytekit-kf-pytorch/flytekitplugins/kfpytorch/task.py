@@ -4,6 +4,7 @@ Kubernetes. It leverages `Pytorch Job <https://github.com/kubeflow/pytorch-opera
 """
 
 import os
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
@@ -31,6 +32,34 @@ from .pod_template import add_shared_mem_volume_to_pod_template
 cloudpickle = lazy_module("cloudpickle")
 
 TORCH_IMPORT_ERROR_MESSAGE = "PyTorch is not installed. Please install `flytekitplugins-kfpytorch['elastic']`."
+
+# Configure logger to show INFO level messages
+logger = logging.getLogger(__name__)
+
+# Allow environment variable to control logging level
+log_level = os.environ.get('FLYTE_PYTORCH_LOG_LEVEL', 'INFO').upper()
+logger.setLevel(getattr(logging, log_level, logging.INFO))
+
+# Add console handler if not already present
+if not logger.handlers:
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(getattr(logging, log_level, logging.INFO))
+    formatter = logging.Formatter('[%(levelname)s] %(asctime)s - flytekitplugins.kfpytorch - %(message)s')
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+# Force immediate output
+logger.info(f"PyTorch Elastic plugin logger initialized with level: {log_level}")
+
+# Version marker for debugging
+PYTORCH_ELASTIC_FIX_VERSION = "1.0-nnodes-override-fix"
+print(f"[PYTORCH_ELASTIC_DEBUG] Plugin loaded with fix version: {PYTORCH_ELASTIC_FIX_VERSION}", flush=True)
+
+# Check if debug mode is enabled via environment variable
+if os.environ.get('PYTORCH_ELASTIC_DEBUG', '').lower() == 'true':
+    print(f"[PYTORCH_ELASTIC_DEBUG] Debug mode is ENABLED", flush=True)
+    print(f"[PYTORCH_ELASTIC_DEBUG] Current working directory: {os.getcwd()}", flush=True)
+    print(f"[PYTORCH_ELASTIC_DEBUG] Python version: {sys.version}", flush=True)
 
 
 @dataclass
@@ -344,6 +373,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         # Handle both int and string nnodes values
         nnodes = task_config.nnodes
         logger.info(f"PytorchElasticFunctionTask.__init__: nnodes={nnodes}, type={type(nnodes)}")
+        print(f"[PYTORCH_ELASTIC_DEBUG] __init__: nnodes={nnodes}, type={type(nnodes)}", flush=True)
         
         if isinstance(nnodes, int):
             initial_task_type = self._ELASTIC_TASK_TYPE_STANDALONE if nnodes == 1 else self._ELASTIC_TASK_TYPE
@@ -353,6 +383,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             initial_task_type = self._ELASTIC_TASK_TYPE_STANDALONE if nnodes_str in ["1", "1:1"] else self._ELASTIC_TASK_TYPE
         
         logger.info(f"PytorchElasticFunctionTask.__init__: initial_task_type={initial_task_type}")
+        print(f"[PYTORCH_ELASTIC_DEBUG] __init__: initial_task_type={initial_task_type}", flush=True)
 
         super(PytorchElasticFunctionTask, self).__init__(
             task_config=task_config,
@@ -383,6 +414,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         Dynamically determine task type based on current nnodes configuration.
         This ensures that task type updates when task_config is overridden.
         """
+        print(f"[PYTORCH_ELASTIC_DEBUG] task_type property accessed", flush=True)
         if self._task_config:
             # Handle both int and string nnodes values
             nnodes = self._task_config.nnodes
@@ -412,10 +444,11 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         Raises:
             FlyteRecoverableException: If the first exception raised in the local worker group is or
                 inherits from `FlyteRecoverableException`.
-            RuntimeError: If the first exception raised in the local worker group is not and does not
+            RuntimeError: The first exception raised in the local worker group is not and does not
                 inherit from `FlyteRecoverableException`.
             IgnoreOutputs: Raised when the task is successful in any worker group with index > 0.
         """
+        print(f"[PYTORCH_ELASTIC_DEBUG] _execute: ENTERED ELASTIC LAUNCH METHOD", flush=True)
         logger.info("_execute: Starting elastic launch execution")
         logger.info(f"_execute: task_config.nnodes={self._task_config.nnodes}")
         
@@ -578,9 +611,13 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
 
         Handles the exception scope for the `_execute` method.
         """
+        print(f"[PYTORCH_ELASTIC_DEBUG] ========== EXECUTE METHOD CALLED ==========", flush=True)
         logger.info(f"PytorchElasticFunctionTask.execute called")
         logger.info(f"Current task_config: {self._task_config}")
         logger.info(f"Current task_type: {self.task_type}")
+        
+        print(f"[PYTORCH_ELASTIC_DEBUG] execute: task_config={self._task_config}", flush=True)
+        print(f"[PYTORCH_ELASTIC_DEBUG] execute: task_type={self.task_type}", flush=True)
         
         # Log relevant environment variables
         logger.info("Environment variables:")
@@ -590,36 +627,45 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         logger.info(f"  - MASTER_ADDR: {os.environ.get('MASTER_ADDR', 'NOT SET')}")
         logger.info(f"  - MASTER_PORT: {os.environ.get('MASTER_PORT', 'NOT SET')}")
         
+        print(f"[PYTORCH_ELASTIC_DEBUG] Environment: PET_NNODES={os.environ.get('PET_NNODES', 'NOT SET')}", flush=True)
+        
         # Check if this is a single-node configuration
         nnodes = self._task_config.nnodes
         is_single_node = False
         if isinstance(nnodes, int):
             is_single_node = (nnodes == 1)
             logger.info(f"execute: nnodes is int={nnodes}, is_single_node={is_single_node}")
+            print(f"[PYTORCH_ELASTIC_DEBUG] execute: nnodes is int={nnodes}, is_single_node={is_single_node}", flush=True)
         else:
             # For string values like "1:4", check if it's "1" or "1:1"
             nnodes_str = str(nnodes)
             is_single_node = nnodes_str in ["1", "1:1"]
             logger.info(f"execute: nnodes is str={nnodes_str}, is_single_node={is_single_node}")
+            print(f"[PYTORCH_ELASTIC_DEBUG] execute: nnodes is str={nnodes_str}, is_single_node={is_single_node}", flush=True)
         
         # For single-node execution, bypass elastic launch and run directly
         if is_single_node:
             # Run as a regular Python task without elastic launch
             logger.info("execute: Single-node detected, bypassing elastic launch and calling super().execute()")
+            print(f"[PYTORCH_ELASTIC_DEBUG] *** SINGLE-NODE DETECTED - BYPASSING ELASTIC LAUNCH ***", flush=True)
             try:
                 # Get parent class info
                 parent_class = super().__class__
                 logger.info(f"execute: Parent class is {parent_class}")
                 logger.info(f"execute: Calling {parent_class.__name__}.execute()")
+                print(f"[PYTORCH_ELASTIC_DEBUG] execute: Calling parent {parent_class.__name__}.execute()", flush=True)
                 result = super().execute(**kwargs)
                 logger.info(f"execute: Parent execute returned successfully")
+                print(f"[PYTORCH_ELASTIC_DEBUG] execute: Parent execute completed successfully", flush=True)
                 return result
             except Exception as e:
                 logger.error(f"execute: Error in parent execute: {type(e).__name__}: {e}")
+                print(f"[PYTORCH_ELASTIC_DEBUG] execute: ERROR in parent execute: {type(e).__name__}: {e}", flush=True)
                 raise
         
         # For multi-node execution, use elastic launch
         logger.info("execute: Multi-node detected, calling _execute() with elastic launch")
+        print(f"[PYTORCH_ELASTIC_DEBUG] *** MULTI-NODE DETECTED - USING ELASTIC LAUNCH ***", flush=True)
         return self._execute(**kwargs)
 
     def get_custom(self, settings: SerializationSettings) -> Optional[Dict[str, Any]]:

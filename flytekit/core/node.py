@@ -231,10 +231,12 @@ class Node(object):
         if task_config is not None:
             logger.warning("This override is beta. We may want to revisit this in the future.")
             logger.info(f"with_overrides: Overriding task_config from {self.run_entity._task_config} to {task_config}")
+            print(f"[NODE_OVERRIDE_DEBUG] with_overrides: Overriding task_config from {self.run_entity._task_config} to {task_config}", flush=True)
             if not isinstance(task_config, type(self.run_entity._task_config)):
                 raise ValueError("can't change the type of the task config")
             self.run_entity._task_config = task_config
             logger.info(f"with_overrides: Task config override complete. New config: {self.run_entity._task_config}")
+            print(f"[NODE_OVERRIDE_DEBUG] with_overrides: Task config override complete. New config: {self.run_entity._task_config}", flush=True)
 
         if container_image is not None:
             assert_not_promise(container_image, "container_image")
