@@ -397,7 +397,11 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         except ImportError:
             raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
 
-        nnodes_str = os.environ.get("PET_NNODES", str(self._task_config.nnodes))
+        # Ensure single-pod mode never waits for multiple nodes due to env overrides
+        if self.task_type == self._ELASTIC_TASK_TYPE_STANDALONE:
+            nnodes_str = "1"
+        else:
+            nnodes_str = os.environ.get("PET_NNODES", str(self._task_config.nnodes))
         min_nodes, max_nodes = run.parse_min_max_nnodes(nnodes_str)
 
         nproc_per_node = int(os.environ.get("PET_NPROC_PER_NODE", self._task_config.nproc_per_node))
