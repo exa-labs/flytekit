@@ -388,3 +388,41 @@ def test_nnodes_override_reverse() -> None:
     
     # Verify they're different (override took effect)
     assert original_custom != overridden_custom, "Override should change the custom config"
+
+
+def test_fix2_serialization_isolation() -> None:
+    """Test Fix 2: Ensure serialization with overrides doesn't affect original task."""
+    from flytekit import workflow
+    from flytekit.configuration import SerializationSettings
+    from flytekit.tools.translator import get_serializable_workflow
+    from collections import OrderedDict
+    
+    # Create a task with default nnodes=2 (multi-node)
+    @task(task_config=Elastic(nnodes=2, nproc_per_node=1))
+    def multi_node_task():
+        return "done"
+    
+    @workflow
+    def test_workflow():
+        # Override to single-node
+        return multi_node_task().with_overrides(
+            task_config=Elastic(nnodes=1, nproc_per_node=1)
+        )
+    
+    # Test serialization with Fix 2
+    settings = SerializationSettings(image_config=None)
+    entity_mapping = OrderedDict()
+    
+    # Serialize the workflow - this should trigger Fix 2 logic
+    wf_spec = get_serializable_workflow(entity_mapping, settings, test_workflow)
+    
+    # Verify that the original task config was not permanently modified
+    assert multi_node_task._task_config.nnodes == 2, "Original task config should remain unchanged"
+    
+    # Verify that the node still has the override applied
+    node = list(test_workflow.nodes)[0]
+    assert node.run_entity._task_config.nnodes == 1, "Node should still have override applied"
+    
+    # Verify that serialization produced the correct result
+    # The serialized workflow should contain a task with single-node config
+    assert wf_spec is not None, "Workflow serialization should succeed"
