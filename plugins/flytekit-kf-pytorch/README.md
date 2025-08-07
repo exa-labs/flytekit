@@ -107,3 +107,16 @@ def adaptive_training(use_single_node: bool) -> float:
 - `nnodes>1`: Task type is `"pytorch"`, uses PyTorchJob with elastic launch
 - String values like `"1"` or `"1:1"` are treated as single-node
 - Elastic ranges like `"1:4"` are treated as multi-node
+
+## Debug Output
+
+The plugin now automatically prints debug messages to help diagnose issues. Look for messages with the `[PYTORCH_ELASTIC]` prefix:
+
+```
+[PYTORCH_ELASTIC] Plugin loaded with fix version: 1.0-nnodes-override-fix
+[PYTORCH_ELASTIC] __init__: nnodes=1, type=<class 'int'>
+[PYTORCH_ELASTIC] execute: task_config=Elastic(nnodes=1, nproc_per_node=1, ...)
+[PYTORCH_ELASTIC] *** SINGLE-NODE DETECTED - BYPASSING ELASTIC LAUNCH ***
+```
+
+If you see these messages in your logs, the fix is working correctly.

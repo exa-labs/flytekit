@@ -3,6 +3,7 @@ This Plugin adds the capability of running distributed pytorch training to Flyte
 Kubernetes. It leverages `Pytorch Job <https://github.com/kubeflow/pytorch-operator>`_ Plugin from kubeflow.
 """
 
+import logging
 import os
 import sys
 
@@ -14,27 +15,27 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
 
+import cloudpickle
+import flytekit
 from flyteidl.plugins.kubeflow import common_pb2 as kubeflow_common
 from flyteidl.plugins.kubeflow import pytorch_pb2 as pytorch_task
 from google.protobuf.json_format import MessageToDict
 
-import flytekit
-from flytekit import PythonFunctionTask, Resources, lazy_module
+from flytekit import FlyteContextManager, PythonFunctionTask, Resources, lazy_module, task
 from flytekit.configuration import SerializationSettings
-from flytekit.core.context_manager import FlyteContextManager, OutputMetadata
+from flytekit.core.base_task import PythonTask
+from flytekit.core.context_manager import FlyteContext, OutputMetadata, OutputMetadataTracker
 from flytekit.core.pod_template import PodTemplate
 from flytekit.core.resources import convert_resources_to_resource_model
-from flytekit.exceptions.user import (
-    FlyteRecoverableException,
-    FlyteUserRuntimeException,
-)
+from flytekit.exceptions.base import FlyteRecoverableException
+from flytekit.exceptions.user import FlyteUserRuntimeException
 from flytekit.extend import IgnoreOutputs, TaskPlugins
-from flytekit.loggers import logger
+from flytekit.models import task as _task_models
 
-from .error_handling import create_recoverable_error_file, is_recoverable_worker_error
+from .error_handling import is_recoverable_worker_error
 from .pod_template import add_shared_mem_volume_to_pod_template
 
-cloudpickle = lazy_module("cloudpickle")
+pd = lazy_module("pandas")
 
 TORCH_IMPORT_ERROR_MESSAGE = "PyTorch is not installed. Please install `flytekitplugins-kfpytorch['elastic']`."
 
