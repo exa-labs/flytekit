@@ -397,17 +397,38 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         except ImportError:
             raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
 
+        # Determine if we are in single-pod mode (python-task) or multi-node (pytorch)
+        single_pod_mode = self.task_type == self._ELASTIC_TASK_TYPE_STANDALONE
+
         # Ensure single-pod mode never waits for multiple nodes due to env overrides
-        if self.task_type == self._ELASTIC_TASK_TYPE_STANDALONE:
-            nnodes_str = "1"
-        else:
-            nnodes_str = os.environ.get("PET_NNODES", str(self._task_config.nnodes))
+        nnodes_str_env = os.environ.get("PET_NNODES")
+        nnodes_str = "1" if single_pod_mode else (nnodes_str_env or str(self._task_config.nnodes))
         min_nodes, max_nodes = run.parse_min_max_nnodes(nnodes_str)
 
-        nproc_per_node = int(os.environ.get("PET_NPROC_PER_NODE", self._task_config.nproc_per_node))
-        max_restarts = int(os.environ.get("PET_MAX_RESTARTS", self._task_config.max_restarts))
-        monitor_interval = int(os.environ.get("PET_MONITOR_INTERVAL", self._task_config.monitor_interval))
-        rdzv_endpoint = os.environ.get("PET_RDZV_ENDPOINT", "localhost:0")
+        nproc_per_node_env = os.environ.get("PET_NPROC_PER_NODE")
+        nproc_per_node = int(nproc_per_node_env or self._task_config.nproc_per_node)
+        max_restarts_env = os.environ.get("PET_MAX_RESTARTS")
+        max_restarts = int(max_restarts_env or self._task_config.max_restarts)
+        monitor_interval_env = os.environ.get("PET_MONITOR_INTERVAL")
+        monitor_interval = int(monitor_interval_env or self._task_config.monitor_interval)
+
+        # In single-pod mode, always rendezvous on loopback to avoid cross-pod endpoints from env overrides
+        rdzv_endpoint_env = os.environ.get("PET_RDZV_ENDPOINT")
+        rdzv_endpoint = "127.0.0.1:0" if single_pod_mode else (rdzv_endpoint_env or "localhost:0")
+
+        # Emit detailed debug so misconfigurations are obvious in logs
+        logger.info(
+            "[Elastic] mode=%s nnodes_str=%s -> min_nodes=%s max_nodes=%s nproc_per_node=%s "
+            "rdzv_backend=%s rdzv_endpoint=%s start_method=%s",
+            "single-pod" if single_pod_mode else "multi-node",
+            nnodes_str_env if nnodes_str_env is not None else str(self._task_config.nnodes),
+            min_nodes,
+            max_nodes,
+            nproc_per_node,
+            self.rdzv_backend,
+            rdzv_endpoint,
+            self._task_config.start_method,
+        )
 
         # If OMP_NUM_THREADS is not set, set it to 1 to avoid overloading the system.
         # Doing so to copy the default behavior of torchrun.
