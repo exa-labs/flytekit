@@ -232,7 +232,19 @@ class Node(object):
             logger.warning("This override is beta. We may want to revisit this in the future.")
             if not isinstance(task_config, type(self.run_entity._task_config)):
                 raise ValueError("can't change the type of the task config")
+            
+            # Add debugging for task config overrides
+            old_config = self.run_entity._task_config
+            logger.info(f"Applying task_config override on node {self.id}")
+            logger.info(f"  Old config: {old_config}")
+            logger.info(f"  New config: {task_config}")
+            
+            # For Elastic PyTorch tasks, specifically log nnodes changes
+            if hasattr(old_config, 'nnodes') and hasattr(task_config, 'nnodes'):
+                logger.info(f"  Elastic PyTorch nnodes override: {old_config.nnodes} -> {task_config.nnodes}")
+            
             self.run_entity._task_config = task_config
+            logger.info(f"Task config override applied successfully")
 
         if container_image is not None:
             assert_not_promise(container_image, "container_image")

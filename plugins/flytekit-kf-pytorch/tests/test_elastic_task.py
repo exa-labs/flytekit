@@ -310,3 +310,81 @@ def test_recoverable_exception_timestamp() -> None:
         test_task()
 
     assert e.value.timestamp is not None
+
+
+def test_nnodes_override() -> None:
+    """Test that nnodes overrides work correctly in get_custom()."""
+    from flytekit import workflow
+    from flytekit.configuration import SerializationSettings
+    
+    # Create a task with default nnodes=2 (multi-node)
+    @task(task_config=Elastic(nnodes=2, nproc_per_node=1))
+    def multi_node_task():
+        return "done"
+    
+    @workflow
+    def test_workflow():
+        # Override to single-node
+        return multi_node_task().with_overrides(
+            task_config=Elastic(nnodes=1, nproc_per_node=1)
+        )
+    
+    # Get the workflow node
+    wf = test_workflow
+    node = list(wf.nodes)[0]
+    
+    # Verify the override was applied to the task config
+    assert node.run_entity._task_config.nnodes == 1
+    
+    # Test serialization - this is where the bug would manifest
+    settings = SerializationSettings(image_config=None)
+    
+    # Original task should return custom config (PyTorchJob for multi-node)
+    original_custom = multi_node_task.get_custom(settings)
+    assert original_custom is not None, "Multi-node task should have custom config"
+    
+    # Overridden task should return None (normal pod for single-node)
+    overridden_custom = node.run_entity.get_custom(settings)
+    assert overridden_custom is None, "Single-node override should have no custom config"
+    
+    # Verify they're different (override took effect)
+    assert original_custom != overridden_custom, "Override should change the custom config"
+
+
+def test_nnodes_override_reverse() -> None:
+    """Test overriding from single-node to multi-node."""
+    from flytekit import workflow
+    from flytekit.configuration import SerializationSettings
+    
+    # Create a task with default nnodes=1 (single-node)
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=1))
+    def single_node_task():
+        return "done"
+    
+    @workflow
+    def test_workflow():
+        # Override to multi-node
+        return single_node_task().with_overrides(
+            task_config=Elastic(nnodes=2, nproc_per_node=1)
+        )
+    
+    # Get the workflow node
+    wf = test_workflow
+    node = list(wf.nodes)[0]
+    
+    # Verify the override was applied to the task config
+    assert node.run_entity._task_config.nnodes == 2
+    
+    # Test serialization
+    settings = SerializationSettings(image_config=None)
+    
+    # Original task should return None (normal pod for single-node)
+    original_custom = single_node_task.get_custom(settings)
+    assert original_custom is None, "Single-node task should have no custom config"
+    
+    # Overridden task should return custom config (PyTorchJob for multi-node)
+    overridden_custom = node.run_entity.get_custom(settings)
+    assert overridden_custom is not None, "Multi-node override should have custom config"
+    
+    # Verify they're different (override took effect)
+    assert original_custom != overridden_custom, "Override should change the custom config"
