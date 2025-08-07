@@ -507,13 +507,21 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         return self._execute(**kwargs)
 
     def get_custom(self, settings: SerializationSettings) -> Optional[Dict[str, Any]]:
-        if self._task_config.nnodes == 1:
+        # Get the current task config, which should include any overrides applied via with_overrides()
+        current_nnodes = self._task_config.nnodes
+        
+        # Add debugging to help diagnose override issues
+        logger.info(f"PytorchElasticFunctionTask.get_custom() called with nnodes={current_nnodes} (type: {type(current_nnodes)})")
+        
+        if current_nnodes == 1:
             """
             Torch elastic distributed training is executed in a normal k8s pod so that this
             works without the kubeflow train operator.
             """
+            logger.info("Using single-node execution (normal Kubernetes pod)")
             return super().get_custom(settings)
         else:
+            logger.info(f"Using multi-node execution (PyTorchJob) with nnodes={current_nnodes}")
             from flyteidl.plugins.kubeflow.pytorch_pb2 import ElasticConfig
 
             try:
@@ -521,7 +529,8 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             except ImportError:
                 raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
 
-            min_nodes, max_nodes = run.parse_min_max_nnodes(str(self._task_config.nnodes))
+            min_nodes, max_nodes = run.parse_min_max_nnodes(str(current_nnodes))
+            logger.info(f"Parsed nnodes '{current_nnodes}' to min_nodes={min_nodes}, max_nodes={max_nodes}")
 
             elastic_config = ElasticConfig(
                 rdzv_backend=self.rdzv_backend,
