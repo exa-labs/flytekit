@@ -653,6 +653,15 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         print(f"[PYTORCH_ELASTIC] get_custom: Current task_type property returns: {self.task_type}")
         print(f"[PYTORCH_ELASTIC] get_custom: settings={settings}")
         
+        # Always return ElasticConfig, even for single-node
+        # This ensures the task specification is valid
+        from flyteidl.plugins.kubeflow.pytorch_pb2 import ElasticConfig
+        
+        try:
+            from torch.distributed import run
+        except ImportError:
+            raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
+        
         # Check if this is a single-node configuration
         nnodes = self._task_config.nnodes
         is_single_node = False
@@ -664,43 +673,32 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             is_single_node = nnodes_str in ["1", "1:1"]
         
         print(f"[PYTORCH_ELASTIC] get_custom: nnodes={nnodes}, is_single_node={is_single_node}")
-            
-        if is_single_node:
-            """
-            Torch elastic distributed training is executed in a normal k8s pod so that this
-            works without the kubeflow train operator.
-            """
-            print(f"[PYTORCH_ELASTIC] get_custom: Single-node configuration, returning super().get_custom()")
-            return super().get_custom(settings)
-        else:
-            print(f"[PYTORCH_ELASTIC] get_custom: Multi-node configuration, creating ElasticConfig")
-            from flyteidl.plugins.kubeflow.pytorch_pb2 import ElasticConfig
-
-            try:
-                from torch.distributed import run
-            except ImportError:
-                raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
-
-            min_nodes, max_nodes = run.parse_min_max_nnodes(str(self._task_config.nnodes))
-
-            elastic_config = ElasticConfig(
-                rdzv_backend=self.rdzv_backend,
-                min_replicas=min_nodes,
-                max_replicas=max_nodes,
-                nproc_per_node=self._task_config.nproc_per_node,
-                max_restarts=self._task_config.max_restarts,
-            )
-            run_policy = (
-                _convert_run_policy_to_flyte_idl(self._task_config.run_policy) if self._task_config.run_policy else None
-            )
-            job = pytorch_task.DistributedPyTorchTrainingTask(
-                worker_replicas=pytorch_task.DistributedPyTorchTrainingReplicaSpec(
-                    replicas=max_nodes,
-                ),
-                elastic_config=elastic_config,
-                run_policy=run_policy,
-            )
-            return MessageToDict(job)
+        
+        min_nodes, max_nodes = run.parse_min_max_nnodes(str(self._task_config.nnodes))
+        
+        elastic_config = ElasticConfig(
+            rdzv_backend=self.rdzv_backend,
+            min_replicas=min_nodes,
+            max_replicas=max_nodes,
+            nproc_per_node=self._task_config.nproc_per_node,
+            max_restarts=self._task_config.max_restarts,
+        )
+        run_policy = (
+            _convert_run_policy_to_flyte_idl(self._task_config.run_policy) if self._task_config.run_policy else None
+        )
+        
+        # For single-node, we still return a valid PyTorch job spec
+        # but it will execute differently based on task_type
+        job = pytorch_task.DistributedPyTorchTrainingTask(
+            worker_replicas=pytorch_task.DistributedPyTorchTrainingReplicaSpec(
+                replicas=max_nodes,
+            ),
+            elastic_config=elastic_config,
+            run_policy=run_policy,
+        )
+        
+        print(f"[PYTORCH_ELASTIC] get_custom: Returning PyTorch job spec for {'single' if is_single_node else 'multi'}-node")
+        return MessageToDict(job)
 
 
 # Register the PytorchElastic Plugin into the flytekit core plugin system
