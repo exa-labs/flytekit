@@ -62,3 +62,61 @@ To migrate from v0 to v1, change the following:
     ```
     task_config=PyTorch(worker=Worker(replicas=10)),
     ```
+
+## Dynamic Execution Modes with Overrides
+
+The PyTorch Elastic plugin now supports dynamic switching between single-node and multi-node execution modes using `with_overrides()`. This allows you to adapt your training based on runtime conditions without creating separate task definitions.
+
+### Example: Dynamic Node Configuration
+
+```python
+from flytekit import task, workflow
+from flytekitplugins.kfpytorch import Elastic
+
+# Define a task with default multi-node configuration
+@task(task_config=Elastic(nnodes=2, nproc_per_node=2))
+def train_model(epochs: int, batch_size: int) -> float:
+    # Your training code here
+    return accuracy
+
+@workflow
+def adaptive_training(use_single_node: bool) -> float:
+    if use_single_node:
+        # Override to single-node execution
+        # This will run as a regular pod without PyTorchJob
+        result = train_model(epochs=10, batch_size=32).with_overrides(
+            task_config=Elastic(nnodes=1, nproc_per_node=1)
+        )
+    else:
+        # Use the original multi-node configuration
+        result = train_model(epochs=10, batch_size=32)
+    
+    return result
+```
+
+### Key Benefits
+
+1. **No Rendezvous Timeouts**: Single-node tasks bypass elastic launch entirely, avoiding unnecessary rendezvous attempts
+2. **Resource Efficiency**: Single-node tasks run as regular pods, reducing overhead
+3. **Flexibility**: Switch between execution modes based on runtime conditions
+4. **Backward Compatible**: Existing tasks continue to work as before
+
+### Execution Behavior
+
+- `nnodes=1`: Task type becomes `"python-task"`, executes directly without elastic launch
+- `nnodes>1`: Task type is `"pytorch"`, uses PyTorchJob with elastic launch
+- String values like `"1"` or `"1:1"` are treated as single-node
+- Elastic ranges like `"1:4"` are treated as multi-node
+
+## Debug Output
+
+The plugin now automatically prints debug messages to help diagnose issues. Look for messages with the `[PYTORCH_ELASTIC]` prefix:
+
+```
+[PYTORCH_ELASTIC] Plugin loaded with fix version: 1.0-nnodes-override-fix
+[PYTORCH_ELASTIC] __init__: nnodes=1, type=<class 'int'>
+[PYTORCH_ELASTIC] execute: task_config=Elastic(nnodes=1, nproc_per_node=1, ...)
+[PYTORCH_ELASTIC] *** SINGLE-NODE DETECTED - BYPASSING ELASTIC LAUNCH ***
+```
+
+If you see these messages in your logs, the fix is working correctly.
