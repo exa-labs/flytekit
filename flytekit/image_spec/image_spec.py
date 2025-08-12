@@ -294,7 +294,8 @@ class ImageSpec:
         if spec.requirements:
             # If requirements is a uv.lock file, parse it and hash local dependencies
             if spec.requirements.endswith("uv.lock"):
-                from flytekit.tools.fast_registration import compute_digest
+                from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
+                from flytekit.tools.script_mode import ls_files
 
                 hasher = hashlib.sha1()
                 # First hash the uv.lock file itself
@@ -311,19 +312,35 @@ class ImageSpec:
                             path = source["directory"]
                             if path == "." and not spec.install_project:
                                 continue
-                            # Hash the directory contents
+                            # Hash the directory contents with ignore patterns
                             dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                            dir_hash = compute_digest(dir_path)
-                            hasher.update(dir_hash.encode())
+                            if dir_path.exists() and dir_path.is_dir():
+                                # Apply the same ignore patterns as used when copying files
+                                ignore_group = IgnoreGroup(str(dir_path), [GitIgnore, DockerIgnore, StandardIgnore])
+                                _, dir_hash = ls_files(
+                                    str(dir_path),
+                                    self.source_copy_mode,
+                                    deref_symlinks=False,
+                                    ignore_group=ignore_group,
+                                )
+                                hasher.update(dir_hash.encode())
                         elif "editable" in source:
                             path = source["editable"]
                             if path == "." and not spec.install_project:
                                 continue
 
-                            # Hash the editable package directory
+                            # Hash the editable package directory with ignore patterns
                             edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                            edit_hash = compute_digest(edit_path)
-                            hasher.update(edit_hash.encode())
+                            if edit_path.exists() and edit_path.is_dir():
+                                # Apply the same ignore patterns as used when copying files
+                                ignore_group = IgnoreGroup(str(edit_path), [GitIgnore, DockerIgnore, StandardIgnore])
+                                _, edit_hash = ls_files(
+                                    str(edit_path),
+                                    self.source_copy_mode,
+                                    deref_symlinks=False,
+                                    ignore_group=ignore_group,
+                                )
+                                hasher.update(edit_hash.encode())
 
                 requirements = hasher.hexdigest()
             else:
