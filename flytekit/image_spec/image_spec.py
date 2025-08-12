@@ -44,38 +44,46 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
     # Extract region from registry URL
     match = re.match(r"(\d+)\.dkr\.ecr\.(.+?)\.amazonaws\.com", registry)
     if not match:
+        click.secho(f"Failed to parse ECR registry URL: {registry}", fg="red")
         return None
 
     account_id, region = match.groups()
 
+    click.secho(f"Extracted - Account ID: {account_id}, Region: {region}, Repository: {repository}, Tag: {tag}", fg="cyan")
+    
     try:
-        # Use AWS CLI to check if image exists
+        # Use AWS CLI to check if image exists  
+        image_ids_json = json.dumps([{"imageTag": tag}])
         cmd = [
-            "aws",
-            "ecr",
-            "describe-images",
-            "--repository-name",
-            repository,
-            "--image-ids",
-            f"imageTag={tag}",
-            "--region",
-            region,
-            "--output",
-            "json",
+            "aws", "ecr", "describe-images",
+            "--repository-name", repository,
+            "--image-ids", image_ids_json,
+            "--region", region,
+            "--output", "json"
         ]
-
+        
+        # Output the command being executed
+        click.secho(f"Executing AWS ECR command: {' '.join(cmd)}", fg="blue")
+        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-
+        
         if result.returncode == 0:
             data = json.loads(result.stdout)
             return len(data.get("imageDetails", [])) > 0
-        elif "ImageNotFoundException" in result.stderr or "RepositoryNotFoundException" in result.stderr:
-            return False
-        else:
-            # Some other error occurred
-            click.secho(f"Failed to check ECR image: {result.stderr}", fg="yellow")
-            return None
-
+        elif result.returncode != 0:
+            # Check for various image not found scenarios
+            if any(phrase in result.stderr for phrase in [
+                "ImageNotFoundException", 
+                "RepositoryNotFoundException",
+                "does not exist within the repository",
+                "does not exist in the repository"
+            ]):
+                click.secho(f"Image not found in ECR: {result.stderr}", fg="yellow")
+                return False
+            else:
+                # Some other error occurred
+                click.secho(f"Failed to check ECR image: {result.stderr}", fg="yellow")
+                return None
     except subprocess.TimeoutExpired:
         click.secho("ECR check timed out", fg="yellow")
         return None
@@ -386,7 +394,15 @@ class ImageSpec:
         # Check if we should try ECR first
         if self.registry and is_ecr_registry(self.registry) and check_aws_cli_and_creds():
             click.secho(f"Checking ECR for image {self.image_name()}...", fg="blue")
-            ecr_result = check_ecr_image_exists(self.registry, self.name, self.tag)
+            # Extract repository name from registry - everything after the registry domain
+            registry_parts = self.registry.split('/', 1)
+            if len(registry_parts) > 1:
+                # Registry has a path: account.dkr.ecr.region.amazonaws.com/namespace
+                repository = f"{registry_parts[1]}/{self.name}"
+            else:
+                # Registry is just the domain: account.dkr.ecr.region.amazonaws.com
+                repository = self.name
+            ecr_result = check_ecr_image_exists(self.registry.split('/')[0], repository, self.tag)
             if ecr_result is not None:
                 if ecr_result:
                     click.secho(f"Image {self.image_name()} found in ECR.", fg="green")
