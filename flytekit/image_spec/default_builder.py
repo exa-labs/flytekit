@@ -295,7 +295,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
     # Export requirements from uv.lock to requirements.txt format
     # This excludes editable installs (-e) and local relative path dependencies
-    requirements_export_cmd = rf"uv export --format requirements-txt | grep -v '^\(-e\|\.\./\)' > {requirements_path}"
+    requirements_export_cmd = rf"uv export --format requirements-txt {image_spec.uv_export_args} | grep -v '^\(-e\|\.\./\)' > {requirements_path}"
     subprocess.run(requirements_export_cmd, shell=True, check=True)
 
     # Write local packages file
@@ -600,6 +600,36 @@ class DefaultImageBuilder(ImageSpecBuilder):
         if unsupported_parameters:
             msg = f"The following parameters are unsupported and ignored: {unsupported_parameters}"
             warnings.warn(msg, UserWarning, stacklevel=2)
+
+        # Check if build tools are available
+        import shutil
+
+        if image_spec.use_depot:
+            if not shutil.which("depot"):
+                raise RuntimeError(
+                    "Depot is not installed or not in PATH. "
+                    "Please install depot (https://depot.dev/docs/installation) or use Docker instead by setting use_depot=False"
+                )
+        else:
+            if not shutil.which("docker"):
+                raise RuntimeError(
+                    "Docker is not installed or not in PATH. "
+                    "Please install Docker (https://docs.docker.com/get-docker/) or use depot by setting use_depot=True"
+                )
+
+            # Check if Docker daemon is running
+            try:
+                result = run(["docker", "info"], capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Docker daemon is not running or not accessible. Error: {result.stderr}\n"
+                        "Please start Docker daemon or use depot by setting use_depot=True"
+                    )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to check Docker daemon status: {str(e)}\n"
+                    "Please ensure Docker is properly installed and running, or use depot by setting use_depot=True"
+                )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

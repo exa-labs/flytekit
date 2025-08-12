@@ -29,25 +29,26 @@ FLYTE_FORCE_PUSH_IMAGE_SPEC = "FLYTE_FORCE_PUSH_IMAGE_SPEC"
 def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional[bool]:
     """
     Check if an image exists in ECR using AWS CLI.
-    
+
     Args:
         registry: ECR registry URL (e.g., "123456789012.dkr.ecr.us-east-1.amazonaws.com")
         repository: Repository name (e.g., "my-app")
         tag: Image tag
-        
+
     Returns:
         True if image exists, False if not, None if check failed
     """
-    import subprocess
     import json
-    
+    import subprocess
+
     # Extract region from registry URL
     match = re.match(r"(\d+)\.dkr\.ecr\.(.+?)\.amazonaws\.com", registry)
     if not match:
         click.secho(f"Failed to parse ECR registry URL: {registry}", fg="red")
         return None
-    
+
     account_id, region = match.groups()
+
     click.secho(f"Extracted - Account ID: {account_id}, Region: {region}, Repository: {repository}, Tag: {tag}", fg="cyan")
     
     try:
@@ -66,11 +67,6 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         
-        # Output the raw result
-        click.secho(f"Raw stdout: {result.stdout}", fg="cyan")
-        click.secho(f"Raw stderr: {result.stderr}", fg="cyan")
-        click.secho(f"Return code: {result.returncode}", fg="cyan")
-        
         if result.returncode == 0:
             data = json.loads(result.stdout)
             return len(data.get("imageDetails", [])) > 0
@@ -88,7 +84,6 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
                 # Some other error occurred
                 click.secho(f"Failed to check ECR image: {result.stderr}", fg="yellow")
                 return None
-            
     except subprocess.TimeoutExpired:
         click.secho("ECR check timed out", fg="yellow")
         return None
@@ -107,17 +102,17 @@ def is_ecr_registry(registry: str) -> bool:
 def check_aws_cli_and_creds() -> bool:
     """Check if AWS CLI is installed and credentials are configured."""
     import subprocess
-    
+
     try:
         # Check if AWS CLI is installed
         result = subprocess.run(["aws", "--version"], capture_output=True, timeout=5)
         if result.returncode != 0:
             return False
-            
+
         # Check if credentials are configured
         result = subprocess.run(["aws", "sts", "get-caller-identity"], capture_output=True, timeout=10)
         return result.returncode == 0
-        
+
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
     except Exception:
@@ -164,6 +159,7 @@ class ImageSpec:
         copy: List of files/directories to copy to /root. e.g. ["src/file1.txt", "src/file2.txt"]
         python_exec: Python executable to use for install packages
         use_depot: Whether to use depot to build the image. If True, the image will be built using depot. If False, the image will be built using docker.
+        uv_export_args: Extra arguments to pass to uv export.
     """
 
     name: str = "flytekit"
@@ -193,6 +189,7 @@ class ImageSpec:
     python_exec: Optional[str] = None
     install_project: Optional[bool] = False
     use_depot: Optional[bool] = True
+    uv_export_args: str = ""
 
     def __post_init__(self):
         self.name = self.name.lower()
@@ -305,7 +302,8 @@ class ImageSpec:
         if spec.requirements:
             # If requirements is a uv.lock file, parse it and hash local dependencies
             if spec.requirements.endswith("uv.lock"):
-                from flytekit.tools.fast_registration import compute_digest
+                from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
+                from flytekit.tools.script_mode import ls_files
 
                 hasher = hashlib.sha1()
                 # First hash the uv.lock file itself
@@ -322,19 +320,35 @@ class ImageSpec:
                             path = source["directory"]
                             if path == "." and not spec.install_project:
                                 continue
-                            # Hash the directory contents
+                            # Hash the directory contents with ignore patterns
                             dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                            dir_hash = compute_digest(dir_path)
-                            hasher.update(dir_hash.encode())
+                            if dir_path.exists() and dir_path.is_dir():
+                                # Apply the same ignore patterns as used when copying files
+                                ignore_group = IgnoreGroup(str(dir_path), [GitIgnore, DockerIgnore, StandardIgnore])
+                                _, dir_hash = ls_files(
+                                    str(dir_path),
+                                    self.source_copy_mode,
+                                    deref_symlinks=False,
+                                    ignore_group=ignore_group,
+                                )
+                                hasher.update(dir_hash.encode())
                         elif "editable" in source:
                             path = source["editable"]
                             if path == "." and not spec.install_project:
                                 continue
 
-                            # Hash the editable package directory
+                            # Hash the editable package directory with ignore patterns
                             edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                            edit_hash = compute_digest(edit_path)
-                            hasher.update(edit_hash.encode())
+                            if edit_path.exists() and edit_path.is_dir():
+                                # Apply the same ignore patterns as used when copying files
+                                ignore_group = IgnoreGroup(str(edit_path), [GitIgnore, DockerIgnore, StandardIgnore])
+                                _, edit_hash = ls_files(
+                                    str(edit_path),
+                                    self.source_copy_mode,
+                                    deref_symlinks=False,
+                                    ignore_group=ignore_group,
+                                )
+                                hasher.update(edit_hash.encode())
 
                 requirements = hasher.hexdigest()
             else:
@@ -397,12 +411,17 @@ class ImageSpec:
                 return ecr_result
             # If ECR check failed, fall back to Docker
             click.secho("ECR check failed, falling back to Docker check...", fg="yellow")
-        
+
         import docker
         from docker.errors import APIError, ImageNotFound
 
+        # Track if we can check with either Docker or AWS
+        docker_available = False
+        docker_error = None
+
         try:
             client = docker.from_env()
+            docker_available = True
             if self.registry:
                 client.images.get_registry_data(self.image_name())
             else:
@@ -424,6 +443,7 @@ class ImageSpec:
         except ImageNotFound:
             return False
         except Exception as e:
+            docker_error = str(e)
             # if docker engine is not running locally, use requests to check if the image exists.
             if self.registry is None:
                 container_registry = None
@@ -452,6 +472,15 @@ class ImageSpec:
                     f"You can upgrade the package by running:\n"
                     f"    pip install --upgrade docker"
                 )
+
+            # Check if we couldn't check with either Docker or AWS
+            if not docker_available and self.registry and is_ecr_registry(self.registry):
+                # For ECR registries, we need either Docker or AWS CLI
+                if not check_aws_cli_and_creds():
+                    raise RuntimeError(
+                        "Couldn't check if image exists, please make sure either you are using ECR "
+                        "and aws is properly logged in, or otherwise docker is installed and the daemon is accessible"
+                    )
 
             click.secho(f"Failed to check if the image exists with error:\n {e}", fg="red")
             return None
