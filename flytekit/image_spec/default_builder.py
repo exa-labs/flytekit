@@ -22,6 +22,7 @@ from flytekit.image_spec.image_spec import (
 )
 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
 from flytekit.tools.script_mode import ls_files
+from flytekit.tools.script_mode import is_vendorable_repo
 
 UV_LOCK_INSTALL_TEMPLATE = Template(
     """\
@@ -211,7 +212,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     with open(pyproject_toml_src) as f:
         pyproject_content = f.read()
 
-    # Create a directory for local packages
+    # Create directory for non-vendorable local packages (to be installed in-image)
     local_packages_dir = tmp_dir / "local_packages"
     local_packages_dir.mkdir(exist_ok=True)
 
@@ -240,6 +241,10 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         git_root = _find_git_root(package_path)
         if git_root is None:
             raise ValueError(f"Could not find git root for {package_path}")
+
+        # Use shared vendorable detection. Ignore vendorable repos entirely when building the image.
+        if is_vendorable_repo(Path(package_path)) and image_spec.vendor_local:
+            continue
 
         # Get the relative path components and sanitize them
         rel_path = os.path.relpath(path=package_path, start=git_root)
@@ -316,9 +321,6 @@ def prepare_uv_lock_command(image_spec: ImageSpec, pip_install_args: List[str], 
     warnings.warn("uv.lock support is experimental", UserWarning)
 
     _copy_lock_files_into_context(image_spec, "uv.lock", tmp_dir)
-
-    if image_spec.vendor_local:
-        return ""
 
     # Use the same pip install args
     pip_install_args_str = " ".join(pip_install_args)
@@ -522,10 +524,11 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
 
     # Check if local_packages directory exists and is not empty
     local_packages_dir = tmp_dir / "local_packages"
-    if local_packages_dir.exists() and any(local_packages_dir.iterdir()) and not image_spec.vendor_local:
+    if local_packages_dir.exists() and any(local_packages_dir.iterdir()):
         copy_local_packages = "COPY --chown=flytekit local_packages /root/local_packages"
     else:
         copy_local_packages = ""
+        uv_python_install_command = ""
 
     # Only include the uv venv install section if we're using uv.lock
     if is_uv_lock:
