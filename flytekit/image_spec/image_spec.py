@@ -314,43 +314,44 @@ class ImageSpec:
                 # Parse the uv.lock file
                 lock_data = toml.load(spec.requirements)
 
-                # Look for packages with local sources (directory or editable)
-                for package in lock_data.get("package", []):
-                    source = package.get("source", {})
-                    if source:
-                        if "directory" in source:
-                            path = source["directory"]
-                            if path == "." and not spec.install_project:
-                                continue
-                            # Hash the directory contents with ignore patterns
-                            dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                            if dir_path.exists() and dir_path.is_dir():
-                                # Apply the same ignore patterns as used when copying files
-                                ignore_group = IgnoreGroup(str(dir_path), [GitIgnore, DockerIgnore, StandardIgnore])
-                                _, dir_hash = ls_files(
-                                    str(dir_path),
-                                    self.source_copy_mode,
-                                    deref_symlinks=False,
-                                    ignore_group=ignore_group,
-                                )
-                                hasher.update(dir_hash.encode())
-                        elif "editable" in source:
-                            path = source["editable"]
-                            if path == "." and not spec.install_project:
-                                continue
+                if not spec.vendor_local:
+                    # Look for packages with local sources (directory or editable)
+                    for package in lock_data.get("package", []):
+                        source = package.get("source", {})
+                        if source:
+                            if "directory" in source:
+                                path = source["directory"]
+                                if path == "." and not spec.install_project:
+                                    continue
+                                # Hash the directory contents with ignore patterns
+                                dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
+                                if dir_path.exists() and dir_path.is_dir():
+                                    # Apply the same ignore patterns as used when copying files
+                                    ignore_group = IgnoreGroup(str(dir_path), [GitIgnore, DockerIgnore, StandardIgnore])
+                                    _, dir_hash = ls_files(
+                                        str(dir_path),
+                                        self.source_copy_mode,
+                                        deref_symlinks=False,
+                                        ignore_group=ignore_group,
+                                    )
+                                    hasher.update(dir_hash.encode())
+                            elif "editable" in source:
+                                path = source["editable"]
+                                if path == "." and not spec.install_project:
+                                    continue
 
-                            # Hash the editable package directory with ignore patterns
-                            edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                            if edit_path.exists() and edit_path.is_dir():
-                                # Apply the same ignore patterns as used when copying files
-                                ignore_group = IgnoreGroup(str(edit_path), [GitIgnore, DockerIgnore, StandardIgnore])
-                                _, edit_hash = ls_files(
-                                    str(edit_path),
-                                    self.source_copy_mode,
-                                    deref_symlinks=False,
-                                    ignore_group=ignore_group,
-                                )
-                                hasher.update(edit_hash.encode())
+                                # Hash the editable package directory with ignore patterns
+                                edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
+                                if edit_path.exists() and edit_path.is_dir():
+                                    # Apply the same ignore patterns as used when copying files
+                                    ignore_group = IgnoreGroup(str(edit_path), [GitIgnore, DockerIgnore, StandardIgnore])
+                                    _, edit_hash = ls_files(
+                                        str(edit_path),
+                                        self.source_copy_mode,
+                                        deref_symlinks=False,
+                                        ignore_group=ignore_group,
+                                    )
+                                    hasher.update(edit_hash.encode())
 
                 requirements = hasher.hexdigest()
             else:
