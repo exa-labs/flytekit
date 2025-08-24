@@ -317,6 +317,9 @@ def prepare_uv_lock_command(image_spec: ImageSpec, pip_install_args: List[str], 
 
     _copy_lock_files_into_context(image_spec, "uv.lock", tmp_dir)
 
+    if image_spec.vendor_local:
+        return ""
+
     # Use the same pip install args
     pip_install_args_str = " ".join(pip_install_args)
 
@@ -525,7 +528,7 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
         copy_local_packages = ""
 
     # Only include the uv venv install section if we're using uv.lock
-    if is_uv_lock and not image_spec.vendor_local:
+    if is_uv_lock:
         uv_venv_install = """\
 WORKDIR /root
 RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
