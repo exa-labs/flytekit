@@ -519,13 +519,13 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
 
     # Check if local_packages directory exists and is not empty
     local_packages_dir = tmp_dir / "local_packages"
-    if local_packages_dir.exists() and any(local_packages_dir.iterdir()):
+    if local_packages_dir.exists() and any(local_packages_dir.iterdir()) and not image_spec.vendor_local:
         copy_local_packages = "COPY --chown=flytekit local_packages /root/local_packages"
     else:
         copy_local_packages = ""
 
     # Only include the uv venv install section if we're using uv.lock
-    if is_uv_lock:
+    if is_uv_lock and not image_spec.vendor_local:
         uv_venv_install = """\
 WORKDIR /root
 RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\

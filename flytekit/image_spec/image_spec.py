@@ -160,6 +160,7 @@ class ImageSpec:
         python_exec: Python executable to use for install packages
         use_depot: Whether to use depot to build the image. If True, the image will be built using depot. If False, the image will be built using docker.
         uv_export_args: Extra arguments to pass to uv export.
+        vendor_local: Whether to vendor the local project into the image.
     """
 
     name: str = "flytekit"
@@ -190,6 +191,7 @@ class ImageSpec:
     install_project: Optional[bool] = False
     use_depot: Optional[bool] = True
     uv_export_args: str = ""
+    vendor_local: Optional[bool] = False
 
     def __post_init__(self):
         self.name = self.name.lower()
