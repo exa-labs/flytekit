@@ -862,9 +862,11 @@ def run_command(ctx: click.Context, entity: typing.Union[PythonFunctionWorkflow,
 
             with context_manager.FlyteContextManager.with_context(remote.context.new_builder()):
                 show_files = run_level_params.verbose > 0
+                copy_style = CopyFileDetection.ALL if run_level_params.copy_all or run_level_params.vendor_local else run_level_params.copy
+
                 fast_package_options = FastPackageOptions(
                     [],
-                    copy_style=CopyFileDetection.ALL if run_level_params.copy_all else run_level_params.copy,
+                    copy_style=copy_style,
                     show_files=show_files,
                 )
                 
