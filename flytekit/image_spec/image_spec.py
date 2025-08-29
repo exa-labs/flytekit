@@ -302,6 +302,7 @@ class ImageSpec:
         if spec.requirements:
             # If requirements is a uv.lock file, parse it and hash local dependencies
             if spec.requirements.endswith("uv.lock"):
+                from concurrent.futures import ThreadPoolExecutor
                 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
                 from flytekit.tools.script_mode import ls_files
 
@@ -312,7 +313,8 @@ class ImageSpec:
                 # Parse the uv.lock file
                 lock_data = toml.load(spec.requirements)
 
-                # Look for packages with local sources (directory or editable)
+                # Collect all directories that need hashing
+                directories_to_hash = []
                 for package in lock_data.get("package", []):
                     source = package.get("source", {})
                     if source:
@@ -320,35 +322,40 @@ class ImageSpec:
                             path = source["directory"]
                             if path == "." and not spec.install_project:
                                 continue
-                            # Hash the directory contents with ignore patterns
+                            
                             dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
+                            dir_path = dir_path.resolve()
                             if dir_path.exists() and dir_path.is_dir():
-                                # Apply the same ignore patterns as used when copying files
-                                ignore_group = IgnoreGroup(str(dir_path), [GitIgnore, DockerIgnore, StandardIgnore])
-                                _, dir_hash = ls_files(
-                                    str(dir_path),
-                                    self.source_copy_mode,
-                                    deref_symlinks=False,
-                                    ignore_group=ignore_group,
-                                )
-                                hasher.update(dir_hash.encode())
+                                directories_to_hash.append(dir_path)
                         elif "editable" in source:
                             path = source["editable"]
                             if path == "." and not spec.install_project:
                                 continue
-
-                            # Hash the editable package directory with ignore patterns
+                            
                             edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
+                            edit_path = edit_path.resolve()
                             if edit_path.exists() and edit_path.is_dir():
-                                # Apply the same ignore patterns as used when copying files
-                                ignore_group = IgnoreGroup(str(edit_path), [GitIgnore, DockerIgnore, StandardIgnore])
-                                _, edit_hash = ls_files(
-                                    str(edit_path),
-                                    self.source_copy_mode,
-                                    deref_symlinks=False,
-                                    ignore_group=ignore_group,
-                                )
-                                hasher.update(edit_hash.encode())
+                                directories_to_hash.append(edit_path)
+
+                def hash_directory(dir_path):
+                    """Hash a single directory."""
+                    ignore_group = IgnoreGroup(str(dir_path), [GitIgnore, DockerIgnore, StandardIgnore])
+                    _, dir_hash = ls_files(
+                        str(dir_path),
+                        self.source_copy_mode,
+                        deref_symlinks=False,
+                        ignore_group=ignore_group,
+                    )
+                    return dir_hash
+
+                # Hash directories in parallel
+                if directories_to_hash:
+                    with ThreadPoolExecutor(max_workers=min(len(directories_to_hash), os.cpu_count() or 1)) as executor:
+                        directory_hashes = list(executor.map(hash_directory, directories_to_hash))
+                    
+                    # Update hasher with results in the same order they were collected
+                    for dir_hash in directory_hashes:
+                        hasher.update(dir_hash.encode())
 
                 requirements = hasher.hexdigest()
             else:
