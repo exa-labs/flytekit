@@ -271,8 +271,9 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     non_vendored_packages = []
     vendored_packages = []
 
-    # Track local packages for separate installation
+    # Track local packages for separate installation and path mapping
     local_packages_list = []
+    path_mapping = {}  # old_path -> new_path mapping
 
     # Copy each local package from the lock file and update its path
     for package in lock_data["package"]:
@@ -333,17 +334,16 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         else:
             shutil.copy2(package_path, target_path)
 
-
         # Update the paths in both files
         old_path = source[source_type]
         new_path = f"/root/local_packages/{rel_path}"
         
+        # Track the path mapping for updating references
+        path_mapping[old_path] = new_path
+        
         package["source"][source_type] = new_path
         non_vendored_packages.append(package)
 
-        lock_content = lock_content.replace(f'{source_type} = "{old_path}"', f'{source_type} = "{new_path}"')
-        lock_content = lock_content.replace(f'directory = "{old_path}"', f'directory = "{new_path}"')
-        lock_content = lock_content.replace(f'editable = "{old_path}"', f'editable = "{new_path}"')
         pyproject_content = pyproject_content.replace(f'path = "{old_path}"', f'path = "{new_path}"')
 
         # Add to local packages list
@@ -352,52 +352,66 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         else:
             local_packages_list.append(new_path)
 
+    # Update all metadata.requires-dist entries to use new paths
+    all_packages = [root_package] + non_vendored_packages if root_package else non_vendored_packages
+    for package in all_packages:
+        if "metadata" in package and "requires-dist" in package["metadata"]:
+            for requirement in package["metadata"]["requires-dist"]:
+                # Check if this requirement has a path that needs updating
+                for old_path, new_path in path_mapping.items():
+                    # Check for both 'editable' and 'directory' path references
+                    if requirement.get("editable") == old_path:
+                        requirement["editable"] = new_path
+                    elif requirement.get("directory") == old_path:
+                        requirement["directory"] = new_path
+
     vendored_package_names = [package["name"] for package in vendored_packages]
     non_vendored_package_map = {package["name"]: package for package in non_vendored_packages}
     
-    filtered_dependencies = [dependency for dependency in root_package["dependencies"] if dependency["name"] not in vendored_package_names]
-    root_package["dependencies"] = filtered_dependencies
-    
-    filtered_requires_dist = [requirement for requirement in root_package["metadata"]["requires-dist"] if requirement["name"] not in vendored_package_names]
-    root_package["metadata"]["requires-dist"] = filtered_requires_dist
-    
-    for package in vendored_packages:
-        for dependency in package["dependencies"]:
-            if dependency["name"] not in vendored_package_names:
-                root_package["dependencies"].append(dependency)
+    if root_package:
+        filtered_dependencies = [dependency for dependency in root_package["dependencies"] if dependency["name"] not in vendored_package_names]
+        root_package["dependencies"] = filtered_dependencies
         
-        for requirement in package["metadata"]["requires-dist"]:
-            if requirement["name"] not in vendored_package_names:
-                if requirement["name"] in non_vendored_package_map:
-                    requirement = {
-                        "name": requirement["name"],
-                        **non_vendored_package_map[requirement["name"]]["source"],
-                    }
+        filtered_requires_dist = [requirement for requirement in root_package["metadata"]["requires-dist"] if requirement["name"] not in vendored_package_names]
+        root_package["metadata"]["requires-dist"] = filtered_requires_dist
+        
+        for package in vendored_packages:
+            for dependency in package["dependencies"]:
+                if dependency["name"] not in vendored_package_names:
+                    root_package["dependencies"].append(dependency)
+            
+            for requirement in package["metadata"]["requires-dist"]:
+                if requirement["name"] not in vendored_package_names:
+                    if requirement["name"] in non_vendored_package_map:
+                        requirement = {
+                            "name": requirement["name"],
+                            **non_vendored_package_map[requirement["name"]]["source"],
+                        }
 
-                root_package["metadata"]["requires-dist"].append(requirement)
+                    root_package["metadata"]["requires-dist"].append(requirement)
+        
+        # Dedupe dependencies by name (order-preserving)
+        dependency_names = set()
+        deduped_dependencies = []
+        for dependency in root_package.get("dependencies", []):
+            name = dependency.get("name")
+            if name not in dependency_names:
+                dependency_names.add(name)
+                deduped_dependencies.append(dependency)
+        root_package["dependencies"] = deduped_dependencies
+
+        # Dedupe metadata.requires-dist (order-preserving)
+        requirement_names = set()
+        deduped_requirements = []
+        for requirement in root_package["metadata"].get("requires-dist", []):
+            name = requirement.get("name")
+            if name not in requirement_names:
+                requirement_names.add(name)
+                deduped_requirements.append(requirement)
+
+        root_package["metadata"]["requires-dist"] = deduped_requirements
     
-    # Dedupe dependencies by name (order-preserving)
-    dependency_names = set()
-    deduped_dependencies = []
-    for dependency in root_package.get("dependencies", []):
-        name = dependency.get("name")
-        if name not in dependency_names:
-            dependency_names.add(name)
-            deduped_dependencies.append(dependency)
-    root_package["dependencies"] = deduped_dependencies
-
-    # Dedupe metadata.requires-dist (order-preserving)
-    requirement_names = set()
-    deduped_requirements = []
-    for requirement in root_package["metadata"].get("requires-dist", []):
-        name = requirement.get("name")
-        if name not in requirement_names:
-            requirement_names.add(name)
-            deduped_requirements.append(requirement)
-
-    root_package["metadata"]["requires-dist"] = deduped_requirements
-    
-    lock_data["package"] = [root_package] + non_vendored_packages
+    lock_data["package"] = [root_package] + non_vendored_packages if root_package else non_vendored_packages
 
     # Write the updated files
     lock_path = tmp_dir / "uv.lock"
