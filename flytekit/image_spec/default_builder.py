@@ -189,6 +189,7 @@ WORKDIR /build
 
 RUN mkdir -p tests
 RUN touch tests/__init__.py
+$COPY_LOCAL_PACKAGES
 
 # Build with cache mount - reuses the same cache across builds
 RUN --mount=type=bind,source=uv.lock,target=/build/uv.lock \
@@ -676,6 +677,7 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
     if image_spec.nix:
         docker_content = NIX_DOCKER_FILE_TEMPLATE.substitute(
             TAG=image_spec.tag,
+            COPY_LOCAL_PACKAGES=copy_local_packages,
             ECR_TOKEN=subprocess.run(["aws", "ecr", "get-login-password", "--region", "us-west-2"], capture_output=True, text=True, check=True).stdout.strip()
         )
     else:
