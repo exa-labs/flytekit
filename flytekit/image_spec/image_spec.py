@@ -333,12 +333,13 @@ class ImageSpec:
                         continue
                     if path == "." and not spec.install_project:
                         continue
-                    if is_vendorable_repo(repo) and spec.vendor_local:
-                        continue
 
                     repo = pathlib.Path(os.path.dirname(spec.requirements)) / path
                     repo = repo.resolve()
                     if not repo.exists() or not repo.is_dir():
+                        continue
+
+                    if is_vendorable_repo(repo) and spec.vendor_local:
                         continue
                     
                     directories_to_hash.append(repo)
