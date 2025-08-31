@@ -22,6 +22,7 @@ from flytekit.image_spec.image_spec import (
 )
 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
 from flytekit.tools.script_mode import ls_files
+from flytekit.tools.script_mode import is_vendorable_repo
 
 UV_LOCK_INSTALL_TEMPLATE = Template(
     """\
@@ -155,6 +156,57 @@ RUN mkdir -p $$HOME && \
     echo "export PATH=$$PATH" >> $$HOME/.profile
 """)
 
+NIX_DOCKER_FILE_TEMPLATE = Template("""\
+# Use Ubuntu as base instead of nixpkgs/nix for better compatibility
+FROM ubuntu:24.04
+
+# Install curl and other basic dependencies needed for the installer
+RUN apt-get update -y && \
+    apt-get install -y \
+        curl \
+        sudo \
+        xz-utils \
+        git \
+        ca-certificates \
+        rsync && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Nix using cache mount so it persists across builds
+RUN --mount=type=cache,target=/nix,id=nix-determinate \
+    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+        sh -s -- install linux \
+        --determinate \
+        --extra-conf "sandbox = true" \
+        --extra-conf "max-substitution-jobs = 256" \
+        --extra-conf "http-connections = 256" \
+        --extra-conf "download-buffer-size = 1073741824" \
+        --init none \
+        --no-confirm
+
+# Create a working directory for the build
+WORKDIR /build
+
+RUN mkdir -p tests
+RUN touch tests/__init__.py
+
+# Build with cache mount - reuses the same cache across builds
+RUN --mount=type=bind,source=uv.lock,target=/build/uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=/build/pyproject.toml \
+    --mount=type=bind,source=README.md,target=/build/README.md \
+    --mount=type=bind,source=flake.nix,target=/build/flake.nix \
+    --mount=type=bind,source=flake.lock,target=/build/flake.lock \
+    --mount=type=cache,target=/nix,id=nix-determinate \
+    --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
+    --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
+    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+    nix run .#docker.copyToRegistry -- \
+    --image-parallel-copies 32 \
+    --debug \
+    --dest-creds "AWS:$ECR_TOKEN"
+""")
+
+
 
 def get_flytekit_for_pypi():
     """Get flytekit version on PyPI."""
@@ -211,9 +263,13 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     with open(pyproject_toml_src) as f:
         pyproject_content = f.read()
 
-    # Create a directory for local packages
+    # Create directory for non-vendorable local packages (to be installed in-image)
     local_packages_dir = tmp_dir / "local_packages"
     local_packages_dir.mkdir(exist_ok=True)
+    
+    root_package = None
+    non_vendored_packages = []
+    vendored_packages = []
 
     # Track local packages for separate installation
     local_packages_list = []
@@ -227,9 +283,11 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         elif "editable" in source:
             source_type = "editable"
         else:
+            non_vendored_packages.append(package)
             continue
 
         if source[source_type] == "." and not image_spec.install_project:
+            root_package = package
             continue
 
         # Get the absolute path of the package
@@ -241,6 +299,11 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         if git_root is None:
             raise ValueError(f"Could not find git root for {package_path}")
 
+        # Use shared vendorable detection. Ignore vendorable repos entirely when building the image.
+        if is_vendorable_repo(Path(package_path)) and image_spec.vendor_local:
+            vendored_packages.append(package)
+            continue
+        
         # Get the relative path components and sanitize them
         rel_path = os.path.relpath(path=package_path, start=git_root)
         target_path = local_packages_dir / rel_path
@@ -270,9 +333,14 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         else:
             shutil.copy2(package_path, target_path)
 
+
         # Update the paths in both files
         old_path = source[source_type]
         new_path = f"/root/local_packages/{rel_path}"
+        
+        package["source"][source_type] = new_path
+        non_vendored_packages.append(package)
+
         lock_content = lock_content.replace(f'{source_type} = "{old_path}"', f'{source_type} = "{new_path}"')
         lock_content = lock_content.replace(f'directory = "{old_path}"', f'directory = "{new_path}"')
         lock_content = lock_content.replace(f'editable = "{old_path}"', f'editable = "{new_path}"')
@@ -284,9 +352,57 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         else:
             local_packages_list.append(new_path)
 
+    vendored_package_names = [package["name"] for package in vendored_packages]
+    non_vendored_package_map = {package["name"]: package for package in non_vendored_packages}
+    
+    filtered_dependencies = [dependency for dependency in root_package["dependencies"] if dependency["name"] not in vendored_package_names]
+    root_package["dependencies"] = filtered_dependencies
+    
+    filtered_requires_dist = [requirement for requirement in root_package["metadata"]["requires-dist"] if requirement["name"] not in vendored_package_names]
+    root_package["metadata"]["requires-dist"] = filtered_requires_dist
+    
+    for package in vendored_packages:
+        for dependency in package["dependencies"]:
+            if dependency["name"] not in vendored_package_names:
+                root_package["dependencies"].append(dependency)
+        
+        for requirement in package["metadata"]["requires-dist"]:
+            if requirement["name"] not in vendored_package_names:
+                if requirement["name"] in non_vendored_package_map:
+                    requirement = {
+                        "name": requirement["name"],
+                        **non_vendored_package_map[requirement["name"]]["source"],
+                    }
+
+                root_package["metadata"]["requires-dist"].append(requirement)
+    
+    # Dedupe dependencies by name (order-preserving)
+    dependency_names = set()
+    deduped_dependencies = []
+    for dependency in root_package.get("dependencies", []):
+        name = dependency.get("name")
+        if name not in dependency_names:
+            dependency_names.add(name)
+            deduped_dependencies.append(dependency)
+    root_package["dependencies"] = deduped_dependencies
+
+    # Dedupe metadata.requires-dist (order-preserving)
+    requirement_names = set()
+    deduped_requirements = []
+    for requirement in root_package["metadata"].get("requires-dist", []):
+        name = requirement.get("name")
+        if name not in requirement_names:
+            requirement_names.add(name)
+            deduped_requirements.append(requirement)
+
+    root_package["metadata"]["requires-dist"] = deduped_requirements
+    
+    lock_data["package"] = [root_package] + non_vendored_packages
+
     # Write the updated files
     lock_path = tmp_dir / "uv.lock"
-    lock_path.write_text(lock_content)
+    toml.dump(lock_data, open(lock_path, "w"))
+    print("lock_path", lock_path)
 
     pyproject_path = tmp_dir / "pyproject.toml"
     pyproject_path.write_text(pyproject_content)
@@ -301,7 +417,15 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     # Write local packages file
     local_packages_path = tmp_dir / "local_packages.txt"
     local_packages_path.write_text("\n".join(local_packages_list))
-
+    
+    if image_spec.nix:
+        flake_path = lock_dir / "flake.nix"
+        flake_lock_path = lock_dir / "flake.lock"
+        readme_path = lock_dir / "README.md"
+        
+        shutil.copy(flake_path, tmp_dir / "flake.nix")
+        shutil.copy(flake_lock_path, tmp_dir / "flake.lock")
+        shutil.copy(readme_path, tmp_dir / "README.md")
 
 def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir: Path):
     if image_spec.packages is not None:
@@ -523,6 +647,7 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
         copy_local_packages = "COPY --chown=flytekit local_packages /root/local_packages"
     else:
         copy_local_packages = ""
+        uv_python_install_command = ""
 
     # Only include the uv venv install section if we're using uv.lock
     if is_uv_lock:
@@ -535,21 +660,27 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
     else:
         uv_venv_install = ""
 
-    docker_content = DOCKER_FILE_TEMPLATE.substitute(
-        UV_PYTHON_INSTALL_COMMAND=uv_python_install_command,
-        APT_INSTALL_COMMAND=apt_install_command,
-        INSTALL_PYTHON_TEMPLATE=python_install_template.template,
-        EXTRA_PATH=python_install_template.extra_path,
-        PYTHON_EXEC=python_install_template.python_exec,
-        BASE_IMAGE=base_image,
-        ENV=env,
-        COPY_COMMAND_RUNTIME=copy_command_runtime,
-        ENTRYPOINT=entrypoint,
-        RUN_COMMANDS=run_commands,
-        EXTRA_COPY_CMDS=extra_copy_cmds,
-        COPY_LOCAL_PACKAGES=copy_local_packages,
-        UV_VENV_INSTALL=uv_venv_install,
-    )
+    if image_spec.nix:
+        docker_content = NIX_DOCKER_FILE_TEMPLATE.substitute(
+            TAG=image_spec.tag,
+            ECR_TOKEN=subprocess.run(["aws", "ecr", "get-login-password", "--region", "us-west-2"], capture_output=True, text=True, check=True).stdout.strip()
+        )
+    else:
+        docker_content = DOCKER_FILE_TEMPLATE.substitute(
+            UV_PYTHON_INSTALL_COMMAND=uv_python_install_command,
+            APT_INSTALL_COMMAND=apt_install_command,
+            INSTALL_PYTHON_TEMPLATE=python_install_template.template,
+            EXTRA_PATH=python_install_template.extra_path,
+            PYTHON_EXEC=python_install_template.python_exec,
+            BASE_IMAGE=base_image,
+            ENV=env,
+            COPY_COMMAND_RUNTIME=copy_command_runtime,
+            ENTRYPOINT=entrypoint,
+            RUN_COMMANDS=run_commands,
+            EXTRA_COPY_CMDS=extra_copy_cmds,
+            COPY_LOCAL_PACKAGES=copy_local_packages,
+            UV_VENV_INSTALL=uv_venv_install,
+        )
 
     dockerfile_path = tmp_dir / "Dockerfile"
     dockerfile_path.write_text(docker_content)
@@ -655,7 +786,7 @@ class DefaultImageBuilder(ImageSpecBuilder):
                     image_spec.platform,
                 ]
 
-            if image_spec.registry and push:
+            if image_spec.registry and push and not image_spec.nix:
                 command.append("--push")
             command.append(tmp_dir)
 

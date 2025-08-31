@@ -324,3 +324,97 @@ def _find_project_root(source_path) -> str:
     while os.path.exists(os.path.join(path, "__init__.py")):
         path = path.parent
     return str(path)
+
+
+def _is_pkg_dir(p: Path) -> bool:
+    return p.is_dir() and (p / "__init__.py").exists()
+
+
+def _glob_pkgs(base: Path, patterns: typing.List[str]) -> typing.List[Path]:
+    import fnmatch as _fnm
+    out: typing.List[Path] = []
+    try:
+        for child in base.iterdir():
+            if child.is_dir():
+                for pat in patterns:
+                    if _fnm.fnmatch(child.name, pat) and _is_pkg_dir(child):
+                        out.append(child)
+                        break
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def discover_python_pkg_dirs(repo: Path) -> typing.List[Path]:
+    """Discover importable Python package directories from pyproject config with fallbacks."""
+    import toml as _toml
+
+    pyproj = repo / "pyproject.toml"
+    if pyproj.exists():
+        cfg = _toml.load(pyproj)
+        tool = cfg.get("tool", {})
+
+        st_find = tool.get("setuptools", {}).get("packages", {}).get("find", {})
+        if st_find:
+            wheres = st_find.get("where", ["src"]) or ["src"]
+            includes = st_find.get("include", ["*"]) or ["*"]
+            excludes = set(st_find.get("exclude", []))
+            pkgs: typing.List[Path] = []
+            for w in wheres:
+                base = (repo / w).resolve()
+                for p in _glob_pkgs(base, includes):
+                    import fnmatch as _fnm
+                    if any(_fnm.fnmatch(p.name, ex) for ex in excludes):
+                        continue
+                    pkgs.append(p)
+            if pkgs:
+                return pkgs
+
+        poetry_pkgs = tool.get("poetry", {}).get("packages", [])
+        if poetry_pkgs:
+            pkgs = []
+            for spec in poetry_pkgs:
+                inc = spec.get("include")
+                frm = spec.get("from", ".")
+                if inc:
+                    p = (repo / frm / inc).resolve()
+                    if _is_pkg_dir(p):
+                        pkgs.append(p)
+            if pkgs:
+                return pkgs
+
+        hatch_pkgs = tool.get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {}).get("packages", [])
+        if hatch_pkgs:
+            pkgs = []
+            for spec in hatch_pkgs:
+                if isinstance(spec, str):
+                    p = (repo / spec).resolve()
+                    if _is_pkg_dir(p):
+                        pkgs.append(p)
+                elif isinstance(spec, dict):
+                    inc = spec.get("include")
+                    frm = spec.get("from", ".")
+                    if inc:
+                        p = (repo / frm / inc).resolve()
+                        if _is_pkg_dir(p):
+                            pkgs.append(p)
+            if pkgs:
+                return pkgs
+
+    # Fallback heuristics
+    candidates: typing.List[Path] = []
+    for root in ("src", "."):
+        base = repo / root
+        if base.exists():
+            try:
+                for d in base.iterdir():
+                    if _is_pkg_dir(d):
+                        candidates.append(d)
+            except FileNotFoundError:
+                continue
+    return candidates
+
+
+def is_vendorable_repo(repo: Path) -> bool:
+    """A repo is vendorable if it exposes at least one importable Python package dir."""
+    return len(discover_python_pkg_dirs(repo)) > 0

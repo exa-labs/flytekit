@@ -160,6 +160,8 @@ class ImageSpec:
         python_exec: Python executable to use for install packages
         use_depot: Whether to use depot to build the image. If True, the image will be built using depot. If False, the image will be built using docker.
         uv_export_args: Extra arguments to pass to uv export.
+        vendor_local: Whether to vendor the local project into the image.
+        nix: Whether to use nix to build the image. If True, the image will be built using nix. If False, the image will be built using docker.
     """
 
     name: str = "flytekit"
@@ -190,6 +192,8 @@ class ImageSpec:
     install_project: Optional[bool] = False
     use_depot: Optional[bool] = True
     uv_export_args: str = ""
+    vendor_local: Optional[bool] = False
+    nix: Optional[bool] = False
 
     def __post_init__(self):
         self.name = self.name.lower()
@@ -305,6 +309,7 @@ class ImageSpec:
                 from concurrent.futures import ThreadPoolExecutor
                 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
                 from flytekit.tools.script_mode import ls_files
+                from flytekit.tools.script_mode import is_vendorable_repo
 
                 hasher = hashlib.sha1()
                 # First hash the uv.lock file itself
@@ -317,25 +322,26 @@ class ImageSpec:
                 directories_to_hash = []
                 for package in lock_data.get("package", []):
                     source = package.get("source", {})
-                    if source:
-                        if "directory" in source:
-                            path = source["directory"]
-                            if path == "." and not spec.install_project:
-                                continue
-                            
-                            dir_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                            dir_path = dir_path.resolve()
-                            if dir_path.exists() and dir_path.is_dir():
-                                directories_to_hash.append(dir_path)
-                        elif "editable" in source:
-                            path = source["editable"]
-                            if path == "." and not spec.install_project:
-                                continue
-                            
-                            edit_path = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                            edit_path = edit_path.resolve()
-                            if edit_path.exists() and edit_path.is_dir():
-                                directories_to_hash.append(edit_path)
+
+                    path = None
+                    if "directory" in source:
+                        path = source["directory"]
+                    elif "editable" in source:
+                        path = source["editable"]
+
+                    if not path:
+                        continue
+                    if path == "." and not spec.install_project:
+                        continue
+                    if is_vendorable_repo(repo) and spec.vendor_local:
+                        continue
+
+                    repo = pathlib.Path(os.path.dirname(spec.requirements)) / path
+                    repo = repo.resolve()
+                    if not repo.exists() or not repo.is_dir():
+                        continue
+                    
+                    directories_to_hash.append(repo)
 
                 def hash_directory(dir_path):
                     """Hash a single directory."""

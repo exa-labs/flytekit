@@ -10,6 +10,9 @@ import typing
 import typing as t
 from dataclasses import dataclass, field, fields
 from typing import Iterator, get_args
+import fnmatch
+import shutil
+import toml
 
 import rich_click as click
 import yaml
@@ -68,7 +71,8 @@ from flytekit.remote import (
 from flytekit.remote.executions import FlyteWorkflowExecution
 from flytekit.tools import module_loader
 from flytekit.tools.fast_registration import FastPackageOptions
-from flytekit.tools.script_mode import _find_project_root, compress_scripts, get_all_modules
+from flytekit.tools.script_mode import _find_project_root, compress_scripts, get_all_modules, ls_files
+from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
 from flytekit.tools.translator import Options
 
 
@@ -312,6 +316,16 @@ class RunLevelParams(PyFlyteParams):
             type=str,
             default="",
             help="Assign newly created execution to a given execution cluster label",
+        )
+    )
+    vendor_local: bool = make_click_option_field(
+        click.Option(
+            param_decls=["--vendor-local"],
+            required=False,
+            is_flag=True,
+            default=False,
+            show_default=True,
+            help="Vendor local packages from [tool.uv.sources] into a staged directory before packaging.",
         )
     )
 
@@ -634,6 +648,124 @@ def is_optional(_type):
     return typing.get_origin(_type) is typing.Union and type(None) in typing.get_args(_type)
 
 
+def _is_pkg_dir(p: pathlib.Path) -> bool:
+    return p.is_dir() and (p / "__init__.py").exists()
+
+
+def _glob_pkgs(base: pathlib.Path, patterns: typing.List[str]) -> typing.List[pathlib.Path]:
+    out: typing.List[pathlib.Path] = []
+    try:
+        for child in base.iterdir():
+            if child.is_dir():
+                for pat in patterns:
+                    if fnmatch.fnmatch(child.name, pat) and _is_pkg_dir(child):
+                        out.append(child)
+                        break
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def _discover_pkg_dirs(repo: pathlib.Path) -> typing.List[pathlib.Path]:
+    pyproj = repo / "pyproject.toml"
+    if pyproj.exists():
+        cfg = toml.load(pyproj)
+        tool = cfg.get("tool", {})
+
+        st_find = tool.get("setuptools", {}).get("packages", {}).get("find", {})
+        if st_find:
+            wheres = st_find.get("where", ["src"]) or ["src"]
+            includes = st_find.get("include", ["*"]) or ["*"]
+            excludes = set(st_find.get("exclude", []))
+            pkgs: typing.List[pathlib.Path] = []
+            for w in wheres:
+                base = (repo / w).resolve()
+                for p in _glob_pkgs(base, includes):
+                    if any(fnmatch.fnmatch(p.name, ex) for ex in excludes):
+                        continue
+                    pkgs.append(p)
+            if pkgs:
+                return pkgs
+
+        poetry_pkgs = tool.get("poetry", {}).get("packages", [])
+        if poetry_pkgs:
+            pkgs = []
+            for spec in poetry_pkgs:
+                inc = spec.get("include")
+                frm = spec.get("from", ".")
+                if inc:
+                    p = (repo / frm / inc).resolve()
+                    if _is_pkg_dir(p):
+                        pkgs.append(p)
+            if pkgs:
+                return pkgs
+
+        hatch_pkgs = tool.get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {}).get("packages", [])
+        if hatch_pkgs:
+            pkgs = []
+            for spec in hatch_pkgs:
+                if isinstance(spec, str):
+                    p = (repo / spec).resolve()
+                    if _is_pkg_dir(p):
+                        pkgs.append(p)
+                elif isinstance(spec, dict):
+                    inc = spec.get("include")
+                    frm = spec.get("from", ".")
+                    if inc:
+                        p = (repo / frm / inc).resolve()
+                        if _is_pkg_dir(p):
+                            pkgs.append(p)
+            if pkgs:
+                return pkgs
+
+    # Fallback heuristics
+    candidates: typing.List[pathlib.Path] = []
+    for root in ("src", "."):
+        base = repo / root
+        if base.exists():
+            try:
+                for d in base.iterdir():
+                    if _is_pkg_dir(d):
+                        candidates.append(d)
+            except FileNotFoundError:
+                continue
+    return candidates
+
+
+def _copy_project_tree(source_root: str, staging_root: pathlib.Path) -> None:
+    ignore = IgnoreGroup(source_root, [GitIgnore, DockerIgnore, StandardIgnore])
+    files, _ = ls_files(source_root, CopyFileDetection.ALL, deref_symlinks=False, ignore_group=ignore)
+    for abspath in files:
+        rel = os.path.relpath(abspath, start=source_root)
+        dst = staging_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(abspath, dst)
+
+
+def _vendor_uv_sources(project_root: str, staging_root: pathlib.Path) -> None:
+    pyproj = pathlib.Path(project_root) / "pyproject.toml"
+    if not pyproj.exists():
+        return
+    cfg = toml.load(pyproj)
+    sources = cfg.get("tool", {}).get("uv", {}).get("sources", {})
+    if not isinstance(sources, dict):
+        return
+    root = pyproj.parent.resolve()
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache", "*.ipynb_checkpoints")
+    for _pkg_name, spec in sources.items():
+        if not isinstance(spec, dict):
+            continue
+        src_path = spec.get("path")
+        if not src_path:
+            continue
+        repo = (root / src_path).resolve() if not os.path.isabs(src_path) else pathlib.Path(src_path).resolve()
+        for pkg_dir in _discover_pkg_dirs(repo):
+            dst_dir = staging_root / pkg_dir.name
+            if dst_dir.exists():
+                shutil.rmtree(dst_dir)
+            shutil.copytree(pkg_dir, dst_dir, ignore=ignore)
+
+
 def run_command(ctx: click.Context, entity: typing.Union[PythonFunctionWorkflow, PythonTask, LaunchPlan]):
     """
     Returns a function that is used to implement WorkflowCommand and execute a flyte workflow.
@@ -730,22 +862,41 @@ def run_command(ctx: click.Context, entity: typing.Union[PythonFunctionWorkflow,
 
             with context_manager.FlyteContextManager.with_context(remote.context.new_builder()):
                 show_files = run_level_params.verbose > 0
+                copy_style = CopyFileDetection.ALL if run_level_params.copy_all or run_level_params.vendor_local else run_level_params.copy
+
                 fast_package_options = FastPackageOptions(
                     [],
-                    copy_style=CopyFileDetection.ALL if run_level_params.copy_all else run_level_params.copy,
+                    copy_style=copy_style,
                     show_files=show_files,
                 )
+                
+                if run_level_params.vendor_local:
+                    with tempfile.TemporaryDirectory() as staging_dir:
+                        staging_root = pathlib.Path(staging_dir)
+                        _copy_project_tree(run_level_params.computed_params.project_root, staging_root)
+                        _vendor_uv_sources(run_level_params.computed_params.project_root, staging_root)
 
-                remote_entity = remote.register_script(
-                    entity,
-                    project=run_level_params.project,
-                    domain=run_level_params.domain,
-                    image_config=image_config,
-                    destination_dir=run_level_params.destination_dir,
-                    source_path=run_level_params.computed_params.project_root,
-                    module_name=run_level_params.computed_params.module,
-                    fast_package_options=fast_package_options,
-                )
+                        remote_entity = remote.register_script(
+                            entity,
+                            project=run_level_params.project,
+                            domain=run_level_params.domain,
+                            image_config=image_config,
+                            destination_dir=run_level_params.destination_dir,
+                            source_path=str(staging_root),
+                            module_name=run_level_params.computed_params.module,
+                            fast_package_options=fast_package_options,
+                        )
+                else:
+                    remote_entity = remote.register_script(
+                        entity,
+                        project=run_level_params.project,
+                        domain=run_level_params.domain,
+                        image_config=image_config,
+                        destination_dir=run_level_params.destination_dir,
+                        source_path=run_level_params.computed_params.project_root,
+                        module_name=run_level_params.computed_params.module,
+                        fast_package_options=fast_package_options,
+                    )
 
                 run_remote(
                     remote,
