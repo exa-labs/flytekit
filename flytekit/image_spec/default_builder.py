@@ -402,7 +402,6 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     # Write the updated files
     lock_path = tmp_dir / "uv.lock"
     toml.dump(lock_data, open(lock_path, "w"))
-    print("lock_path", lock_path)
 
     pyproject_path = tmp_dir / "pyproject.toml"
     pyproject_path.write_text(pyproject_content)
