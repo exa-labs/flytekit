@@ -197,6 +197,7 @@ RUN --mount=type=bind,source=uv.lock,target=/build/uv.lock \
     --mount=type=bind,source=README.md,target=/build/README.md \
     --mount=type=bind,source=flake.nix,target=/build/flake.nix \
     --mount=type=bind,source=flake.lock,target=/build/flake.lock \
+    --mount=type=bind,source=local_packages,target=/build/local_packages \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
