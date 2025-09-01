@@ -314,6 +314,12 @@ class ImageSpec:
                 hasher = hashlib.sha1()
                 # First hash the uv.lock file itself
                 hasher.update(pathlib.Path(spec.requirements).read_bytes().strip())
+                 
+                if spec.nix:
+                    flake_nix_path = pathlib.Path(os.path.dirname(spec.requirements)) / "flake.nix"
+                    flake_lock_path = pathlib.Path(os.path.dirname(spec.requirements)) / "flake.lock"
+                    hasher.update(flake_nix_path.read_bytes().strip())
+                    hasher.update(flake_lock_path.read_bytes().strip())
 
                 # Parse the uv.lock file
                 lock_data = toml.load(spec.requirements)
