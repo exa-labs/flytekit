@@ -189,7 +189,6 @@ WORKDIR /build
 
 RUN mkdir -p tests
 RUN touch tests/__init__.py
-$COPY_LOCAL_PACKAGES
 
 # Build with cache mount - reuses the same cache across builds
 RUN --mount=type=bind,source=uv.lock,target=/build/uv.lock \
@@ -338,7 +337,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
         # Update the paths in both files
         old_path = source[source_type]
-        new_path = f"/root/local_packages/{rel_path}"
+        new_path = f"local_packages/{rel_path}"
         
         # Track the path mapping for updating references
         path_mapping[old_path] = new_path
@@ -659,7 +658,7 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
     # Check if local_packages directory exists and is not empty
     local_packages_dir = tmp_dir / "local_packages"
     if local_packages_dir.exists() and any(local_packages_dir.iterdir()):
-        copy_local_packages = "COPY --chown=flytekit local_packages /root/local_packages"
+        copy_local_packages = "COPY --chown=flytekit local_packages local_packages"
     else:
         copy_local_packages = ""
         uv_python_install_command = ""
