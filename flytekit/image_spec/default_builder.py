@@ -424,6 +424,31 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
         root_package["metadata"]["requires-dist"] = deduped_requirements
 
+    if image_spec.nix:
+        # Set up ignore patterns for the package directory
+        ignore_group = IgnoreGroup(str(lock_dir), [GitIgnore, DockerIgnore, StandardIgnore])
+
+        # Get list of files to copy respecting ignore patterns
+        files_to_copy, _ = ls_files(
+            str(lock_dir),
+            CopyFileDetection.ALL,  # Copy all files that aren't ignored
+            deref_symlinks=False,
+            ignore_group=ignore_group,
+        )
+
+        # Copy each file individually
+        for file_to_copy in files_to_copy:
+            file_rel_path = os.path.relpath(file_to_copy, start=str(lock_dir))
+            file_target_path = tmp_dir / file_rel_path
+            file_target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(file_to_copy, file_target_path)
+
+        flake_path = tmp_dir / "flake.nix"
+        flake_lock_path = tmp_dir / "flake.lock"
+        
+        flake_path.write_text(flake_content)
+        flake_lock_path.write_text(flake_lock_content)
+
     lock_data["package"] = [root_package] + non_vendored_packages if root_package else non_vendored_packages
 
     # Write the updated files
@@ -443,31 +468,6 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     # Write local packages file
     local_packages_path = tmp_dir / "local_packages.txt"
     local_packages_path.write_text("\n".join(local_packages_list))
-    
-    if image_spec.nix:
-        flake_path = tmp_dir / "flake.nix"
-        flake_lock_path = tmp_dir / "flake.lock"
-        
-        flake_path.write_text(flake_content)
-        flake_lock_path.write_text(flake_lock_content)
-
-        # Set up ignore patterns for the package directory
-        ignore_group = IgnoreGroup(str(lock_path), [GitIgnore, DockerIgnore, StandardIgnore])
-
-        # Get list of files to copy respecting ignore patterns
-        files_to_copy, _ = ls_files(
-            str(lock_path),
-            CopyFileDetection.ALL,  # Copy all files that aren't ignored
-            deref_symlinks=False,
-            ignore_group=ignore_group,
-        )
-
-        # Copy each file individually
-        for file_to_copy in files_to_copy:
-            file_rel_path = os.path.relpath(file_to_copy, start=str(lock_path))
-            file_target_path = tmp_dir / file_rel_path
-            file_target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(file_to_copy, file_target_path)
         
 
 def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir: Path):
