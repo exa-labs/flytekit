@@ -303,8 +303,10 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
             non_vendored_packages.append(package)
             continue
 
-        if source[source_type] == "." and not image_spec.install_project:
+        if source[source_type] == ".":
             root_package = package
+        
+        if source[source_type] == "." and (not image_spec.install_project and not image_spec.nix):
             continue
 
         # Get the absolute path of the package
