@@ -680,7 +680,9 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
         copy_local_packages = "COPY --chown=flytekit local_packages local_packages"
     else:
         copy_local_packages = ""
-        uv_python_install_command = ""
+
+        if is_uv_lock:
+            uv_python_install_command = ""
 
     # Only include the uv venv install section if we're using uv.lock
     if is_uv_lock:
