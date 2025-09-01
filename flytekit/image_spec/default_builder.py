@@ -187,16 +187,8 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
 # Create a working directory for the build
 WORKDIR /build
 
-RUN mkdir -p tests
-RUN touch tests/__init__.py
-
 # Build with cache mount - reuses the same cache across builds
-RUN --mount=type=bind,source=uv.lock,target=/build/uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=/build/pyproject.toml \
-    --mount=type=bind,source=README.md,target=/build/README.md \
-    --mount=type=bind,source=flake.nix,target=/build/flake.nix \
-    --mount=type=bind,source=flake.lock,target=/build/flake.lock \
-    --mount=type=bind,source=local_packages,target=/build/local_packages \
+RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
@@ -306,7 +298,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         if source[source_type] == ".":
             root_package = package
         
-        if source[source_type] == "." and (not image_spec.install_project and not image_spec.nix):
+        if source[source_type] == "." and not image_spec.install_project:
             continue
 
         # Get the absolute path of the package
@@ -458,9 +450,25 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         
         flake_path.write_text(flake_content)
         flake_lock_path.write_text(flake_lock_content)
+
+        # Set up ignore patterns for the package directory
+        ignore_group = IgnoreGroup(str(lock_path), [GitIgnore, DockerIgnore, StandardIgnore])
+
+        # Get list of files to copy respecting ignore patterns
+        files_to_copy, _ = ls_files(
+            str(lock_path),
+            CopyFileDetection.ALL,  # Copy all files that aren't ignored
+            deref_symlinks=False,
+            ignore_group=ignore_group,
+        )
+
+        # Copy each file individually
+        for file_to_copy in files_to_copy:
+            file_rel_path = os.path.relpath(file_to_copy, start=str(lock_path))
+            file_target_path = tmp_dir / file_rel_path
+            file_target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(file_to_copy, file_target_path)
         
-        readme_path = lock_dir / "README.md"
-        shutil.copy(readme_path, tmp_dir / "README.md")
 
 def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir: Path):
     if image_spec.packages is not None:
