@@ -263,6 +263,21 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
     with open(pyproject_toml_src) as f:
         pyproject_content = f.read()
+        
+    if image_spec.nix:
+        flake_nix_src = lock_dir / "flake.nix"
+        if not flake_nix_src.exists():
+            raise ValueError("flake.nix must exist in the same directory as uv.lock")
+        
+        with open(flake_nix_src) as f:
+            flake_content = f.read()
+        
+        flake_lock_src = lock_dir / "flake.lock"
+        if not flake_lock_src.exists():
+            raise ValueError("flake.lock must exist in the same directory as uv.lock")
+        
+        with open(flake_lock_src) as f:
+            flake_lock_content = f.read()
 
     # Create directory for non-vendorable local packages (to be installed in-image)
     local_packages_dir = tmp_dir / "local_packages"
@@ -346,6 +361,9 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         non_vendored_packages.append(package)
 
         pyproject_content = pyproject_content.replace(f'path = "{old_path}"', f'path = "{new_path}"')
+        if image_spec.nix:
+            flake_content = flake_content.replace(old_path, new_path)
+            flake_lock_content = flake_lock_content.replace(old_path, new_path)
 
         # Add to local packages list
         if source_type == "editable":
@@ -433,12 +451,13 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     local_packages_path.write_text("\n".join(local_packages_list))
     
     if image_spec.nix:
-        flake_path = lock_dir / "flake.nix"
-        flake_lock_path = lock_dir / "flake.lock"
-        readme_path = lock_dir / "README.md"
+        flake_path = tmp_dir / "flake.nix"
+        flake_lock_path = tmp_dir / "flake.lock"
         
-        shutil.copy(flake_path, tmp_dir / "flake.nix")
-        shutil.copy(flake_lock_path, tmp_dir / "flake.lock")
+        flake_path.write_text(flake_content)
+        flake_lock_path.write_text(flake_lock_content)
+        
+        readme_path = lock_dir / "README.md"
         shutil.copy(readme_path, tmp_dir / "README.md")
 
 def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir: Path):
