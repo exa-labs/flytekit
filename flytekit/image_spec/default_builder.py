@@ -201,7 +201,7 @@ RUN --mount=type=bind,source=uv.lock,target=/build/uv.lock \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
-    nix run .#docker.copyToRegistry -- \
+    nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
     --image-parallel-copies 32 \
     --debug \
     --dest-creds "AWS:$ECR_TOKEN"
@@ -676,7 +676,7 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
 
     if image_spec.nix:
         docker_content = NIX_DOCKER_FILE_TEMPLATE.substitute(
-            TAG=image_spec.tag,
+            IMAGE_NAME=image_spec.image_name(),
             COPY_LOCAL_PACKAGES=copy_local_packages,
             ECR_TOKEN=subprocess.run(["aws", "ecr", "get-login-password", "--region", "us-west-2"], capture_output=True, text=True, check=True).stdout.strip()
         )
