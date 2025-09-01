@@ -388,18 +388,18 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     non_vendored_package_map = {package["name"]: package for package in non_vendored_packages}
     
     if root_package:
-        filtered_dependencies = [dependency for dependency in root_package["dependencies"] if dependency["name"] not in vendored_package_names]
+        filtered_dependencies = [dependency for dependency in root_package.get("dependencies", []) if dependency["name"] not in vendored_package_names]
         root_package["dependencies"] = filtered_dependencies
         
-        filtered_requires_dist = [requirement for requirement in root_package["metadata"]["requires-dist"] if requirement["name"] not in vendored_package_names]
+        filtered_requires_dist = [requirement for requirement in root_package.get("metadata", {}).get("requires-dist", []) if requirement["name"] not in vendored_package_names]
         root_package["metadata"]["requires-dist"] = filtered_requires_dist
         
         for package in vendored_packages:
-            for dependency in package["dependencies"]:
+            for dependency in package.get("dependencies", []):
                 if dependency["name"] not in vendored_package_names:
                     root_package["dependencies"].append(dependency)
             
-            for requirement in package["metadata"]["requires-dist"]:
+            for requirement in package.get("metadata", {}).get("requires-dist", []):
                 if requirement["name"] not in vendored_package_names:
                     if requirement["name"] in non_vendored_package_map:
                         requirement = {
@@ -422,14 +422,14 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         # Dedupe metadata.requires-dist (order-preserving)
         requirement_names = set()
         deduped_requirements = []
-        for requirement in root_package["metadata"].get("requires-dist", []):
+        for requirement in root_package.get("metadata", {}).get("requires-dist", []):
             name = requirement.get("name")
             if name not in requirement_names:
                 requirement_names.add(name)
                 deduped_requirements.append(requirement)
 
         root_package["metadata"]["requires-dist"] = deduped_requirements
-    
+
     lock_data["package"] = [root_package] + non_vendored_packages if root_package else non_vendored_packages
 
     # Write the updated files
