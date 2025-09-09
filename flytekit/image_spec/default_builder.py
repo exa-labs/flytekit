@@ -355,9 +355,6 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         non_vendored_packages.append(package)
 
         pyproject_content = pyproject_content.replace(f'path = "{old_path}"', f'path = "{new_path}"')
-        if image_spec.nix:
-            flake_content = flake_content.replace(old_path, new_path)
-            flake_lock_content = flake_lock_content.replace(old_path, new_path)
 
         # Add to local packages list
         if source_type == "editable":
@@ -425,6 +422,74 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         root_package["metadata"]["requires-dist"] = deduped_requirements
 
     if image_spec.nix:
+        # Detect and copy flake path inputs into local_packages, then rewrite flake.nix/flake.lock
+        flake_path_replacements = {}
+        path_input_pattern = re.compile(r'url\s*=\s*"(path:([^"]+))"')
+
+        for match in path_input_pattern.finditer(flake_content):
+            full_spec = match.group(1)  # e.g., path:../../../flakes/python
+            old_rel_path = match.group(2)  # e.g., ../../../flakes/python
+
+            # Resolve source path. If relative, resolve from lock_dir (flake.nix location)
+            if os.path.isabs(old_rel_path):
+                src_path = Path(old_rel_path).resolve()
+            else:
+                src_path = (lock_dir / old_rel_path).resolve()
+
+            if not src_path.exists():
+                raise ValueError(f"Nix flake path input does not exist: {src_path}")
+
+            git_root = _find_git_root(str(src_path))
+            if git_root is None:
+                raise ValueError(f"Could not find git root for Nix flake path input: {src_path}")
+
+            rel_path = os.path.relpath(path=str(src_path), start=str(git_root))
+            target_path = local_packages_dir / rel_path
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Copy with ignore patterns
+            if src_path.is_dir():
+                ignore_group_dep = IgnoreGroup(str(src_path), [GitIgnore, DockerIgnore, StandardIgnore])
+                files_to_copy_dep, _ = ls_files(
+                    str(src_path),
+                    CopyFileDetection.ALL,
+                    deref_symlinks=False,
+                    ignore_group=ignore_group_dep,
+                )
+                for file_to_copy in files_to_copy_dep:
+                    file_rel = os.path.relpath(file_to_copy, start=str(src_path))
+                    file_dst = target_path / file_rel
+                    file_dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(file_to_copy, file_dst)
+            else:
+                shutil.copy2(str(src_path), str(target_path))
+
+            new_rel_path = f"local_packages/{rel_path}"
+
+            # Update flake.nix content in-memory
+            flake_content = flake_content.replace(full_spec, f"path:{new_rel_path}")
+
+            # Track mapping for flake.lock updates
+            flake_path_replacements[old_rel_path] = new_rel_path
+
+        # Update flake.lock JSON for nodes that reference local path inputs
+        if flake_path_replacements:
+            try:
+                flake_lock_obj = json.loads(flake_lock_content)
+                nodes = flake_lock_obj.get("nodes", {})
+                for node in nodes.values():
+                    for key in ("locked", "original"):
+                        obj = node.get(key)
+                        if obj and obj.get("type") == "path":
+                            p = obj.get("path")
+                            if p in flake_path_replacements:
+                                obj["path"] = flake_path_replacements[p]
+                flake_lock_content = json.dumps(flake_lock_obj, indent=2)
+            except Exception:
+                # Fallback: plain string replacement if JSON update fails
+                for old_rel, new_rel in flake_path_replacements.items():
+                    flake_lock_content = flake_lock_content.replace(old_rel, new_rel)
+
         # Set up ignore patterns for the package directory
         ignore_group = IgnoreGroup(str(lock_dir), [GitIgnore, DockerIgnore, StandardIgnore])
 
