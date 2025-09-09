@@ -743,22 +743,47 @@ def _copy_project_tree(source_root: str, staging_root: pathlib.Path) -> None:
 
 
 def _vendor_uv_sources(project_root: str, staging_root: pathlib.Path) -> None:
-    pyproj = pathlib.Path(project_root) / "pyproject.toml"
-    if not pyproj.exists():
+    lock_path = pathlib.Path(project_root) / "uv.lock"
+    if not lock_path.exists():
         return
-    cfg = toml.load(pyproj)
-    sources = cfg.get("tool", {}).get("uv", {}).get("sources", {})
-    if not isinstance(sources, dict):
+    lock_data = toml.load(lock_path)
+    packages = lock_data.get("package", [])
+    if not isinstance(packages, list):
         return
-    root = pyproj.parent.resolve()
+
+    root = lock_path.parent.resolve()
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache", "*.ipynb_checkpoints")
-    for _pkg_name, spec in sources.items():
-        if not isinstance(spec, dict):
+
+    seen_repos: typing.Set[pathlib.Path] = set()
+    for pkg in packages:
+        if not isinstance(pkg, dict):
             continue
-        src_path = spec.get("path")
+        source = pkg.get("source", {})
+        if not isinstance(source, dict):
+            continue
+
+        # uv.lock records local sources as either "directory" or "editable"
+        src_path = source.get("directory") or source.get("editable")
         if not src_path:
             continue
-        repo = (root / src_path).resolve() if not os.path.isabs(src_path) else pathlib.Path(src_path).resolve()
+
+        # Resolve to absolute path
+        repo = pathlib.Path(src_path)
+        if not repo.is_absolute():
+            repo = (root / src_path).resolve()
+        else:
+            repo = repo.resolve()
+
+        # Skip the root project itself (already copied by _copy_project_tree)
+        if repo == root:
+            continue
+
+        if not repo.exists() or not repo.is_dir():
+            continue
+        if repo in seen_repos:
+            continue
+        seen_repos.add(repo)
+
         for pkg_dir in _discover_pkg_dirs(repo):
             dst_dir = staging_root / pkg_dir.name
             if dst_dir.exists():
@@ -874,7 +899,10 @@ def run_command(ctx: click.Context, entity: typing.Union[PythonFunctionWorkflow,
                     with tempfile.TemporaryDirectory() as staging_dir:
                         staging_root = pathlib.Path(staging_dir)
                         _copy_project_tree(run_level_params.computed_params.project_root, staging_root)
-                        _vendor_uv_sources(run_level_params.computed_params.project_root, staging_root)
+
+                        start = pathlib.Path(run_level_params.computed_params.project_root).resolve()
+                        pyproj_root = next((d for d in [start] + list(start.parents) if (d / "pyproject.toml").exists()), start)
+                        _vendor_uv_sources(pyproj_root, staging_root)
 
                         remote_entity = remote.register_script(
                             entity,
