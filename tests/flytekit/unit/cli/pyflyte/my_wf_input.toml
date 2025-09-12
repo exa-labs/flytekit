@@ -1,0 +1,45 @@
+a = 1
+b = "Hello"
+c = 1.1
+e = [1, 2, 3]
+g = "tests/flytekit/unit/cli/pyflyte/testdata/df.parquet"
+h = true
+i = "2020-05-01"
+j = "20H"
+k = "RED"
+p = "None"
+q = "tests/flytekit/unit/cli/pyflyte/testdata"
+remote = "tests/flytekit/unit/cli/pyflyte/testdata"
+image = "tests/flytekit/unit/cli/pyflyte/testdata"
+
+[d]
+i = 1
+a = ["h", "e"]
+
+[f]
+x = 1.0
+y = 2.0
+
+[l]
+hello = "world"
+
+[m]
+a = "b"
+c = "d"
+
+[[n]]
+x = "tests/flytekit/unit/cli/pyflyte/testdata/df.parquet"
+
+[o]
+x = ["tests/flytekit/unit/cli/pyflyte/testdata/df.parquet"]
+
+[[r]]
+i = 1
+a = ["h", "e"]
+
+[s.x]
+i = 1
+a = ["h", "e"]
+
+[t]
+i = [{i = 1, a = ["h", "e"]}]

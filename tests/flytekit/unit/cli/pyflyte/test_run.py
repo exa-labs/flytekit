@@ -299,6 +299,17 @@ def test_all_types_with_yaml_input():
     assert result.exit_code == 0, result.stdout
 
 
+def test_all_types_with_toml_input():
+    runner = CliRunner()
+
+    result = runner.invoke(
+        pyflyte.main,
+        ["run", os.path.join(DIR_NAME, "workflow.py"), "my_wf", "--inputs-file", os.path.join(os.path.dirname(os.path.realpath(__file__)), "my_wf_input.toml")],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.stdout
+
+
 def test_all_types_with_pipe_input(monkeypatch):
     runner = CliRunner()
     input= str(json.load(open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "my_wf_input.json"),"r")))
