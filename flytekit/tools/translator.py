@@ -465,7 +465,44 @@ def get_serializable_node(
             override_pod_spec = _serialize_pod_spec(
                 entity._pod_template, entity.flyte_entity._get_container(settings), settings
             )
-        task_spec = get_serializable(entity_mapping, settings, entity.flyte_entity, options=options)
+        
+        # Fix 2: Override-aware serialization
+        # Create a temporary copy of the task with overrides applied for serialization
+        # This ensures that get_custom() sees the correct configuration without affecting the original task
+        from flytekit import logger
+        import copy
+        
+        task_entity = entity.flyte_entity
+        
+        # Check if we need to create a temporary task copy with overrides applied
+        # This happens when the node's task config differs from the original task config
+        needs_override_copy = False
+        if hasattr(entity, 'run_entity') and hasattr(entity.run_entity, '_task_config'):
+            node_task_config = entity.run_entity._task_config
+            original_task_config = task_entity._task_config
+            
+            # Compare configs to see if they differ (indicating an override was applied)
+            if node_task_config != original_task_config:
+                needs_override_copy = True
+                logger.info(f"Fix 2: Node {entity.id} has task config override, creating temporary copy for serialization")
+                logger.info(f"  Original task config: {original_task_config}")
+                logger.info(f"  Node task config: {node_task_config}")
+                
+                # For Elastic PyTorch tasks, specifically log nnodes changes
+                if hasattr(original_task_config, 'nnodes') and hasattr(node_task_config, 'nnodes'):
+                    logger.info(f"  Elastic PyTorch nnodes override: {original_task_config.nnodes} -> {node_task_config.nnodes}")
+        
+        if needs_override_copy:
+            # Create a shallow copy of the task entity and apply the node's task config
+            # This ensures get_custom() sees the overridden config during serialization
+            temp_task_entity = copy.copy(task_entity)
+            temp_task_entity._task_config = node_task_config
+            
+            logger.info(f"Fix 2: Using temporary task copy with overridden config for serialization")
+            task_spec = get_serializable(entity_mapping, settings, temp_task_entity, options=options)
+        else:
+            # No override needed, use the original task entity
+            task_spec = get_serializable(entity_mapping, settings, task_entity, options=options)
         node_model = workflow_model.Node(
             id=_dnsify(entity.id),
             metadata=entity.metadata,
