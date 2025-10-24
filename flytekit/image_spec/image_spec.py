@@ -26,6 +26,85 @@ _F_IMG_ID = "_F_IMG_ID"
 FLYTE_FORCE_PUSH_IMAGE_SPEC = "FLYTE_FORCE_PUSH_IMAGE_SPEC"
 
 
+# Shared helpers for Nix flake path inputs and git root discovery
+_NIX_FLAKE_PATH_INPUT_PATTERN = re.compile(r'url\s*=\s*"(path:([^"]+))"')
+
+
+def _find_git_root(start_path: typing.Union[str, pathlib.Path]):
+    """Find the root directory of the git repository for a given path."""
+    current = pathlib.Path(start_path).resolve()
+    while current != current.parent:
+        if (current / ".git").exists():
+            return current
+        current = current.parent
+    return None
+
+
+@dataclass
+class NixFlakePathInput:
+    full_spec: str  # e.g., "path:../../some/dir"
+    old_rel_path: str  # e.g., "../../some/dir"
+    src_path: pathlib.Path  # absolute resolved path
+
+
+def discover_nix_flake_path_inputs(
+    lock_dir: typing.Union[str, pathlib.Path], flake_content: typing.Optional[str] = None
+) -> List[NixFlakePathInput]:
+    """Discover Nix flake path inputs declared via url = "path:..." in flake.nix.
+
+    Args:
+        lock_dir: Directory containing flake.nix/flake.lock (typically same as uv.lock)
+        flake_content: Optional preloaded contents of flake.nix; if None, the file is read
+
+    Returns:
+        List of NixFlakePathInput entries describing each discovered path input.
+    """
+    lock_dir_path = pathlib.Path(lock_dir)
+    if flake_content is None:
+        flake_path = lock_dir_path / "flake.nix"
+        if not flake_path.exists():
+            return []
+        flake_content = flake_path.read_text()
+
+    inputs: List[NixFlakePathInput] = []
+    for match in _NIX_FLAKE_PATH_INPUT_PATTERN.finditer(flake_content):
+        full_spec = match.group(1)  # e.g., path:../../../flakes/python
+        old_rel_path = match.group(2)  # e.g., ../../../flakes/python
+
+        # Resolve source path. If relative, resolve from lock_dir (flake.nix location)
+        if os.path.isabs(old_rel_path):
+            src_path = pathlib.Path(old_rel_path).resolve()
+        else:
+            src_path = (lock_dir_path / old_rel_path).resolve()
+
+        inputs.append(NixFlakePathInput(full_spec=full_spec, old_rel_path=old_rel_path, src_path=src_path))
+
+    return inputs
+
+
+def _compute_directory_digest(dir_path: pathlib.Path) -> str:
+    """Compute a stable digest for a directory mirroring builder copy logic (respects .gitignore/.dockerignore)."""
+    # Imports here to avoid circular imports at module load time
+    from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
+    from flytekit.tools.script_mode import ls_files
+
+    ignore_group = IgnoreGroup(str(dir_path), [GitIgnore, DockerIgnore, StandardIgnore])
+    _, dir_hash = ls_files(
+        str(dir_path),
+        CopyFileDetection.ALL,
+        deref_symlinks=False,
+        ignore_group=ignore_group,
+    )
+    return dir_hash
+
+
+def _compute_path_digest(path: pathlib.Path) -> str:
+    if path.is_dir():
+        return _compute_directory_digest(path)
+    # For files, hash bytes directly
+    return hashlib.sha1(path.read_bytes().strip()).hexdigest()
+
+
 def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional[bool]:
     """
     Check if an image exists in ECR using AWS CLI.
@@ -49,35 +128,46 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
 
     account_id, region = match.groups()
 
-    click.secho(f"Extracted - Account ID: {account_id}, Region: {region}, Repository: {repository}, Tag: {tag}", fg="cyan")
-    
+    click.secho(
+        f"Extracted - Account ID: {account_id}, Region: {region}, Repository: {repository}, Tag: {tag}", fg="cyan"
+    )
+
     try:
-        # Use AWS CLI to check if image exists  
+        # Use AWS CLI to check if image exists
         image_ids_json = json.dumps([{"imageTag": tag}])
         cmd = [
-            "aws", "ecr", "describe-images",
-            "--repository-name", repository,
-            "--image-ids", image_ids_json,
-            "--region", region,
-            "--output", "json"
+            "aws",
+            "ecr",
+            "describe-images",
+            "--repository-name",
+            repository,
+            "--image-ids",
+            image_ids_json,
+            "--region",
+            region,
+            "--output",
+            "json",
         ]
-        
+
         # Output the command being executed
         click.secho(f"Executing AWS ECR command: {' '.join(cmd)}", fg="blue")
-        
+
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        
+
         if result.returncode == 0:
             data = json.loads(result.stdout)
             return len(data.get("imageDetails", [])) > 0
         elif result.returncode != 0:
             # Check for various image not found scenarios
-            if any(phrase in result.stderr for phrase in [
-                "ImageNotFoundException", 
-                "RepositoryNotFoundException",
-                "does not exist within the repository",
-                "does not exist in the repository"
-            ]):
+            if any(
+                phrase in result.stderr
+                for phrase in [
+                    "ImageNotFoundException",
+                    "RepositoryNotFoundException",
+                    "does not exist within the repository",
+                    "does not exist in the repository",
+                ]
+            ):
                 click.secho(f"Image not found in ECR: {result.stderr}", fg="yellow")
                 return False
             else:
@@ -304,28 +394,40 @@ class ImageSpec:
             spec = dataclasses.replace(spec, copy=digest)
 
         if spec.requirements:
-            # If requirements is a uv.lock file, parse it and hash local dependencies
+            # If requirements is a uv.lock file, parse it and hash local dependencies and flake inputs
             if spec.requirements.endswith("uv.lock"):
                 from concurrent.futures import ThreadPoolExecutor
-                from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
-                from flytekit.tools.script_mode import ls_files
+
                 from flytekit.tools.script_mode import is_vendorable_repo
 
                 hasher = hashlib.sha1()
+                lock_dir = pathlib.Path(os.path.dirname(spec.requirements))
+
                 # First hash the uv.lock file itself
                 hasher.update(pathlib.Path(spec.requirements).read_bytes().strip())
-                 
+
+                # If nix, include flake.nix and flake.lock file bytes and also hash their path inputs' contents
+                flake_inputs = []
                 if spec.nix:
-                    flake_nix_path = pathlib.Path(os.path.dirname(spec.requirements)) / "flake.nix"
-                    flake_lock_path = pathlib.Path(os.path.dirname(spec.requirements)) / "flake.lock"
-                    hasher.update(flake_nix_path.read_bytes().strip())
-                    hasher.update(flake_lock_path.read_bytes().strip())
+                    flake_nix_path = lock_dir / "flake.nix"
+                    flake_lock_path = lock_dir / "flake.lock"
+                    if flake_nix_path.exists():
+                        hasher.update(flake_nix_path.read_bytes().strip())
+                    if flake_lock_path.exists():
+                        hasher.update(flake_lock_path.read_bytes().strip())
+
+                    try:
+                        flake_inputs = discover_nix_flake_path_inputs(lock_dir)
+                    except Exception:
+                        flake_inputs = []
 
                 # Parse the uv.lock file
                 lock_data = toml.load(spec.requirements)
 
-                # Collect all directories that need hashing
-                directories_to_hash = []
+                # Collect all paths that need hashing
+                paths_to_hash: List[pathlib.Path] = []
+
+                # Local packages from uv.lock
                 for package in lock_data.get("package", []):
                     source = package.get("source", {})
 
@@ -340,35 +442,28 @@ class ImageSpec:
                     if path == "." and not spec.install_project:
                         continue
 
-                    repo = pathlib.Path(os.path.dirname(spec.requirements)) / path
-                    repo = repo.resolve()
-                    if not repo.exists() or not repo.is_dir():
+                    repo = (lock_dir / path).resolve()
+                    if not repo.exists():
                         continue
 
-                    if is_vendorable_repo(repo) and spec.vendor_local:
+                    # Skip vendorable repos when vendor_local is enabled (same behavior as builder)
+                    if repo.is_dir() and is_vendorable_repo(repo) and spec.vendor_local:
                         continue
-                    
-                    directories_to_hash.append(repo)
 
-                def hash_directory(dir_path):
-                    """Hash a single directory."""
-                    ignore_group = IgnoreGroup(str(dir_path), [GitIgnore, DockerIgnore, StandardIgnore])
-                    _, dir_hash = ls_files(
-                        str(dir_path),
-                        self.source_copy_mode,
-                        deref_symlinks=False,
-                        ignore_group=ignore_group,
-                    )
-                    return dir_hash
+                    paths_to_hash.append(repo)
 
-                # Hash directories in parallel
-                if directories_to_hash:
-                    with ThreadPoolExecutor(max_workers=min(len(directories_to_hash), os.cpu_count() or 1)) as executor:
-                        directory_hashes = list(executor.map(hash_directory, directories_to_hash))
-                    
-                    # Update hasher with results in the same order they were collected
-                    for dir_hash in directory_hashes:
-                        hasher.update(dir_hash.encode())
+                # Nix flake path inputs
+                for inp in flake_inputs:
+                    if inp.src_path.exists():
+                        paths_to_hash.append(inp.src_path)
+
+                # Hash paths in parallel using the same ignore logic as the builder
+                if paths_to_hash:
+                    with ThreadPoolExecutor(max_workers=min(len(paths_to_hash), os.cpu_count() or 1)) as executor:
+                        path_hashes = list(executor.map(_compute_path_digest, paths_to_hash))
+
+                    for h in path_hashes:
+                        hasher.update(h.encode())
 
                 requirements = hasher.hexdigest()
             else:
@@ -415,14 +510,14 @@ class ImageSpec:
         if self.registry and is_ecr_registry(self.registry) and check_aws_cli_and_creds():
             click.secho(f"Checking ECR for image {self.image_name()}...", fg="blue")
             # Extract repository name from registry - everything after the registry domain
-            registry_parts = self.registry.split('/', 1)
+            registry_parts = self.registry.split("/", 1)
             if len(registry_parts) > 1:
                 # Registry has a path: account.dkr.ecr.region.amazonaws.com/namespace
                 repository = f"{registry_parts[1]}/{self.name}"
             else:
                 # Registry is just the domain: account.dkr.ecr.region.amazonaws.com
                 repository = self.name
-            ecr_result = check_ecr_image_exists(self.registry.split('/')[0], repository, self.tag)
+            ecr_result = check_ecr_image_exists(self.registry.split("/")[0], repository, self.tag)
             if ecr_result is not None:
                 if ecr_result:
                     click.secho(f"Image {self.image_name()} found in ECR.", fg="green")

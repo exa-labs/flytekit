@@ -19,10 +19,11 @@ from flytekit.image_spec.image_spec import (
     _F_IMG_ID,
     ImageSpec,
     ImageSpecBuilder,
+    _find_git_root,
+    discover_nix_flake_path_inputs,
 )
 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
-from flytekit.tools.script_mode import ls_files
-from flytekit.tools.script_mode import is_vendorable_repo
+from flytekit.tools.script_mode import is_vendorable_repo, ls_files
 
 UV_LOCK_INSTALL_TEMPLATE = Template(
     """\
@@ -200,7 +201,6 @@ RUN --mount=type=bind,source=.,target=/build/ \
 """)
 
 
-
 def get_flytekit_for_pypi():
     """Get flytekit version on PyPI."""
     from flytekit import __version__
@@ -225,14 +225,7 @@ def _is_flytekit(package: str) -> bool:
     return name == "flytekit"
 
 
-def _find_git_root(start_path: str):
-    """Find the root directory of the git repository."""
-    current = Path(start_path).resolve()
-
-    while current != current.parent:
-        if (current / ".git").exists():
-            return current
-        current = current.parent
+# Use shared _find_git_root from image_spec
 
 
 def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
@@ -255,26 +248,26 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
     with open(pyproject_toml_src) as f:
         pyproject_content = f.read()
-        
+
     if image_spec.nix:
         flake_nix_src = lock_dir / "flake.nix"
         if not flake_nix_src.exists():
             raise ValueError("flake.nix must exist in the same directory as uv.lock")
-        
+
         with open(flake_nix_src) as f:
             flake_content = f.read()
-        
+
         flake_lock_src = lock_dir / "flake.lock"
         if not flake_lock_src.exists():
             raise ValueError("flake.lock must exist in the same directory as uv.lock")
-        
+
         with open(flake_lock_src) as f:
             flake_lock_content = f.read()
 
     # Create directory for non-vendorable local packages (to be installed in-image)
     local_packages_dir = tmp_dir / "local_packages"
     local_packages_dir.mkdir(exist_ok=True)
-    
+
     root_package = None
     non_vendored_packages = []
     vendored_packages = []
@@ -297,7 +290,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
         if source[source_type] == ".":
             root_package = package
-        
+
         if source[source_type] == "." and not image_spec.install_project:
             continue
 
@@ -314,7 +307,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         if is_vendorable_repo(Path(package_path)) and image_spec.vendor_local:
             vendored_packages.append(package)
             continue
-        
+
         # Get the relative path components and sanitize them
         rel_path = os.path.relpath(path=package_path, start=git_root)
         target_path = local_packages_dir / rel_path
@@ -347,10 +340,10 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         # Update the paths in both files
         old_path = source[source_type]
         new_path = f"local_packages/{rel_path}"
-        
+
         # Track the path mapping for updating references
         path_mapping[old_path] = new_path
-        
+
         package["source"][source_type] = new_path
         non_vendored_packages.append(package)
 
@@ -377,19 +370,27 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
     vendored_package_names = [package["name"] for package in vendored_packages]
     non_vendored_package_map = {package["name"]: package for package in non_vendored_packages}
-    
+
     if root_package:
-        filtered_dependencies = [dependency for dependency in root_package.get("dependencies", []) if dependency["name"] not in vendored_package_names]
+        filtered_dependencies = [
+            dependency
+            for dependency in root_package.get("dependencies", [])
+            if dependency["name"] not in vendored_package_names
+        ]
         root_package["dependencies"] = filtered_dependencies
-        
-        filtered_requires_dist = [requirement for requirement in root_package.get("metadata", {}).get("requires-dist", []) if requirement["name"] not in vendored_package_names]
+
+        filtered_requires_dist = [
+            requirement
+            for requirement in root_package.get("metadata", {}).get("requires-dist", [])
+            if requirement["name"] not in vendored_package_names
+        ]
         root_package["metadata"]["requires-dist"] = filtered_requires_dist
-        
+
         for package in vendored_packages:
             for dependency in package.get("dependencies", []):
                 if dependency["name"] not in vendored_package_names:
                     root_package["dependencies"].append(dependency)
-            
+
             for requirement in package.get("metadata", {}).get("requires-dist", []):
                 if requirement["name"] not in vendored_package_names:
                     if requirement["name"] in non_vendored_package_map:
@@ -399,7 +400,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
                         }
 
                     root_package["metadata"]["requires-dist"].append(requirement)
-        
+
         # Dedupe dependencies by name (order-preserving)
         dependency_names = set()
         deduped_dependencies = []
@@ -424,17 +425,12 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     if image_spec.nix:
         # Detect and copy flake path inputs into local_packages, then rewrite flake.nix/flake.lock
         flake_path_replacements = {}
-        path_input_pattern = re.compile(r'url\s*=\s*"(path:([^"]+))"')
+        inputs = discover_nix_flake_path_inputs(lock_dir, flake_content)
 
-        for match in path_input_pattern.finditer(flake_content):
-            full_spec = match.group(1)  # e.g., path:../../../flakes/python
-            old_rel_path = match.group(2)  # e.g., ../../../flakes/python
-
-            # Resolve source path. If relative, resolve from lock_dir (flake.nix location)
-            if os.path.isabs(old_rel_path):
-                src_path = Path(old_rel_path).resolve()
-            else:
-                src_path = (lock_dir / old_rel_path).resolve()
+        for inp in inputs:
+            full_spec = inp.full_spec
+            old_rel_path = inp.old_rel_path
+            src_path = inp.src_path
 
             if not src_path.exists():
                 raise ValueError(f"Nix flake path input does not exist: {src_path}")
@@ -510,7 +506,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
         flake_path = tmp_dir / "flake.nix"
         flake_lock_path = tmp_dir / "flake.lock"
-        
+
         flake_path.write_text(flake_content)
         flake_lock_path.write_text(flake_lock_content)
 
@@ -533,7 +529,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     # Write local packages file
     local_packages_path = tmp_dir / "local_packages.txt"
     local_packages_path.write_text("\n".join(local_packages_list))
-        
+
 
 def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir: Path):
     if image_spec.packages is not None:
@@ -774,7 +770,12 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
         docker_content = NIX_DOCKER_FILE_TEMPLATE.substitute(
             IMAGE_NAME=image_spec.image_name(),
             COPY_LOCAL_PACKAGES=copy_local_packages,
-            ECR_TOKEN=subprocess.run(["aws", "ecr", "get-login-password", "--region", "us-west-2"], capture_output=True, text=True, check=True).stdout.strip()
+            ECR_TOKEN=subprocess.run(
+                ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip(),
         )
     else:
         docker_content = DOCKER_FILE_TEMPLATE.substitute(
