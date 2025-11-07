@@ -232,10 +232,14 @@ class PythonAutoContainerTask(PythonTask[T], ABC, metaclass=FlyteTrackedABC):
     def get_k8s_pod(self, settings: SerializationSettings) -> _task_model.K8sPod:
         if self.pod_template is None:
             return None
+        
+        labels = dict(self.pod_template.labels) if self.pod_template.labels else {}
+        labels["execution-user"] = "{{ .executionMetadata.principal }}"
+        
         return _task_model.K8sPod(
             pod_spec=_serialize_pod_spec(self.pod_template, self._get_container(settings), settings),
             metadata=_task_model.K8sObjectMetadata(
-                labels=self.pod_template.labels,
+                labels=labels,
                 annotations=self.pod_template.annotations,
             ),
         )
