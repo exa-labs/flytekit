@@ -6,10 +6,7 @@ import grpc
 from flyteidl.admin.project_pb2 import GetDomainRequest, ProjectListRequest
 from flyteidl.admin.signal_pb2 import SignalList, SignalListRequest, SignalSetRequest, SignalSetResponse
 from flyteidl.service import admin_pb2_grpc as _admin_service
-from flyteidl.service import dataproxy_pb2 as _dataproxy_pb2
-from flyteidl.service import dataproxy_pb2_grpc as dataproxy_service
 from flyteidl.service import signal_pb2_grpc as signal_service
-from flyteidl.service.dataproxy_pb2_grpc import DataProxyServiceStub
 
 from flytekit.clients.auth_helper import (
     get_channel,
@@ -19,6 +16,28 @@ from flytekit.clients.auth_helper import (
 )
 from flytekit.configuration import PlatformConfig
 from flytekit.loggers import logger
+
+_dataproxy_pb2 = None
+_dataproxy_service = None
+_DataProxyServiceStub = None
+
+def _ensure_dataproxy():
+    """Lazy-load dataproxy modules to avoid import-time protobuf errors."""
+    global _dataproxy_pb2, _dataproxy_service, _DataProxyServiceStub
+    if _dataproxy_pb2 is None:
+        try:
+            from flyteidl.service import dataproxy_pb2 as _dp
+            from flyteidl.service import dataproxy_pb2_grpc as _dps
+            from flyteidl.service.dataproxy_pb2_grpc import DataProxyServiceStub as _DPSS
+            _dataproxy_pb2 = _dp
+            _dataproxy_service = _dps
+            _DataProxyServiceStub = _DPSS
+        except (ImportError, AttributeError) as e:
+            raise ImportError(
+                "Failed to import dataproxy modules. This may be due to protobuf version "
+                "incompatibility with protoc-gen-openapiv2. Error: " + str(e)
+            ) from e
+    return _dataproxy_pb2, _dataproxy_service, _DataProxyServiceStub
 
 
 class RawSynchronousFlyteClient(object):
@@ -34,8 +53,6 @@ class RawSynchronousFlyteClient(object):
         RawSynchronousFlyteClient(PlatformConfig(endpoint="a.b.com", insecure=True))  # or
         SynchronousFlyteClient(PlatformConfig(endpoint="a.b.com", insecure=True))
     """
-
-    _dataproxy_stub: DataProxyServiceStub
 
     def __init__(self, cfg: PlatformConfig, **kwargs):
         """
@@ -59,13 +76,26 @@ class RawSynchronousFlyteClient(object):
         )
         self._stub = _admin_service.AdminServiceStub(self._channel)
         self._signal = signal_service.SignalServiceStub(self._channel)
-        self._dataproxy_stub = dataproxy_service.DataProxyServiceStub(self._channel)
+        self._dataproxy_stub = None
 
         logger.info(
             f"Flyte Client configured -> {self._cfg.endpoint} in {'insecure' if self._cfg.insecure else 'secure'} mode."
         )
         # metadata will hold the value of the token to send to the various endpoints.
         self._metadata = None
+
+    @property
+    def _dataproxy_stub(self):
+        """Lazy-load dataproxy stub on first access."""
+        if not hasattr(self, '_dataproxy_stub_cached') or self._dataproxy_stub_cached is None:
+            _, _, DataProxyServiceStub = _ensure_dataproxy()
+            self._dataproxy_stub_cached = DataProxyServiceStub(self._channel)
+        return self._dataproxy_stub_cached
+
+    @_dataproxy_stub.setter
+    def _dataproxy_stub(self, value):
+        """Allow setting the stub (for initialization)."""
+        self._dataproxy_stub_cached = value
 
     @classmethod
     def with_root_certificate(cls, cfg: PlatformConfig, root_cert_file: str) -> RawSynchronousFlyteClient:
@@ -596,22 +626,19 @@ class RawSynchronousFlyteClient(object):
     #  Data proxy endpoints
     #
     ####################################################################################################################
-    def create_upload_location(
-        self, create_upload_location_request: _dataproxy_pb2.CreateUploadLocationRequest
-    ) -> _dataproxy_pb2.CreateUploadLocationResponse:
+    def create_upload_location(self, create_upload_location_request):
         """
         Get a signed url to be used during fast registration
         :param flyteidl.service.dataproxy_pb2.CreateUploadLocationRequest create_upload_location_request:
         :rtype: flyteidl.service.dataproxy_pb2.CreateUploadLocationResponse
         """
+        _ensure_dataproxy()
         return self._dataproxy_stub.CreateUploadLocation(create_upload_location_request, metadata=self._metadata)
 
-    def create_download_location(
-        self, create_download_location_request: _dataproxy_pb2.CreateDownloadLocationRequest
-    ) -> _dataproxy_pb2.CreateDownloadLocationResponse:
+    def create_download_location(self, create_download_location_request):
+        _ensure_dataproxy()
         return self._dataproxy_stub.CreateDownloadLocation(create_download_location_request, metadata=self._metadata)
 
-    def create_download_link(
-        self, create_download_link_request: _dataproxy_pb2.CreateDownloadLinkRequest
-    ) -> _dataproxy_pb2.CreateDownloadLinkResponse:
+    def create_download_link(self, create_download_link_request):
+        _ensure_dataproxy()
         return self._dataproxy_stub.CreateDownloadLink(create_download_link_request, metadata=self._metadata)

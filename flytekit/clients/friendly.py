@@ -15,9 +15,25 @@ from flyteidl.admin import version_pb2 as _version_pb2
 from flyteidl.admin import workflow_attributes_pb2 as _workflow_attributes_pb2
 from flyteidl.admin import workflow_pb2 as _workflow_pb2
 from flyteidl.core import identifier_pb2 as _identifier_pb2
-from flyteidl.service import dataproxy_pb2 as _data_proxy_pb2
-from flyteidl.service.dataproxy_pb2 import ARTIFACT_TYPE_DECK
 from google.protobuf.duration_pb2 import Duration
+
+_data_proxy_pb2 = None
+ARTIFACT_TYPE_DECK = None
+
+def _ensure_dataproxy():
+    """Lazy-load dataproxy_pb2 module to avoid import-time protobuf errors."""
+    global _data_proxy_pb2, ARTIFACT_TYPE_DECK
+    if _data_proxy_pb2 is None:
+        try:
+            from flyteidl.service import dataproxy_pb2 as _dp
+            _data_proxy_pb2 = _dp
+            ARTIFACT_TYPE_DECK = _dp.ARTIFACT_TYPE_DECK
+        except (ImportError, AttributeError) as e:
+            raise ImportError(
+                "Failed to import dataproxy_pb2. This may be due to protobuf version "
+                "incompatibility with protoc-gen-openapiv2. Error: " + str(e)
+            ) from e
+    return _data_proxy_pb2
 
 from flytekit.clients.raw import RawSynchronousFlyteClient as _RawSynchronousFlyteClient
 from flytekit.models import common as _common
@@ -1011,7 +1027,7 @@ class SynchronousFlyteClient(_RawSynchronousFlyteClient):
         expires_in: typing.Optional[datetime.timedelta] = None,
         filename_root: typing.Optional[str] = None,
         add_content_md5_metadata: bool = True,
-    ) -> _data_proxy_pb2.CreateUploadLocationResponse:
+    ):
         """
         Get a signed url to be used during fast registration
 
@@ -1027,6 +1043,7 @@ class SynchronousFlyteClient(_RawSynchronousFlyteClient):
         :param add_content_md5_metadata: If true, the content md5 will be added to the metadata in signed URL
         :rtype: flyteidl.service.dataproxy_pb2.CreateUploadLocationResponse
         """
+        _ensure_dataproxy()
         try:
             expires_in_pb = None
             if expires_in:
@@ -1048,7 +1065,8 @@ class SynchronousFlyteClient(_RawSynchronousFlyteClient):
 
     def get_download_signed_url(
         self, native_url: str, expires_in: datetime.timedelta = None
-    ) -> _data_proxy_pb2.CreateDownloadLocationResponse:
+    ):
+        _ensure_dataproxy()
         expires_in_pb = None
         if expires_in:
             expires_in_pb = Duration()
@@ -1060,7 +1078,8 @@ class SynchronousFlyteClient(_RawSynchronousFlyteClient):
             )
         )
 
-    def get_data(self, flyte_uri: str) -> _data_proxy_pb2.GetDataResponse:
+    def get_data(self, flyte_uri: str):
+        _ensure_dataproxy()
         req = _data_proxy_pb2.GetDataRequest(flyte_url=flyte_uri)
 
         resp = self._dataproxy_stub.GetData(req, metadata=self._metadata)
@@ -1072,9 +1091,9 @@ class SynchronousFlyteClient(_RawSynchronousFlyteClient):
         project: str,
         domain: str,
         name: str,
-        artifact_type: _data_proxy_pb2.ArtifactType = ARTIFACT_TYPE_DECK,
+        artifact_type = None,
         expires_in: datetime.timedelta = None,
-    ) -> _data_proxy_pb2.CreateDownloadLinkResponse:
+    ):
         """
         Get a signed url for an artifact.
 
@@ -1086,6 +1105,9 @@ class SynchronousFlyteClient(_RawSynchronousFlyteClient):
         :param expires_in: If provided this defines a requested expiration duration for the generated url
         :rtype: flyteidl.service.dataproxy_pb2.CreateDownloadLinkResponse
         """
+        _ensure_dataproxy()
+        if artifact_type is None:
+            artifact_type = ARTIFACT_TYPE_DECK
         expires_in_pb = None
         if expires_in:
             expires_in_pb = Duration()
