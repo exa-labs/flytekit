@@ -379,6 +379,8 @@ def update_image_spec_copy_handling(image_spec: ImageSpec, settings: Serializati
     build command (and it probably shouldn't be), the builder has no concept of which files to copy, when, and
     from where. (or to where but that is hard-coded)
     """
+    modified = False
+
     # Handle when the copy method is explicitly set by the user.
     if image_spec.source_copy_mode is not None:
         if image_spec.source_copy_mode != CopyFileDetection.NO_COPY:
@@ -386,6 +388,7 @@ def update_image_spec_copy_handling(image_spec: ImageSpec, settings: Serializati
             # and allows the user to not have to specify source root.
             if image_spec.source_root is None and settings.source_root is not None:
                 image_spec.source_root = settings.source_root
+                modified = True
 
     # Handle the default behavior of setting the behavior based on the inverse of fast register usage
     # The default behavior additionally requires that serializa
@@ -396,8 +399,17 @@ def update_image_spec_copy_handling(image_spec: ImageSpec, settings: Serializati
         if settings.source_root is not None or image_spec.source_root is not None:
             if image_spec.source_root is None:
                 image_spec.source_root = settings.source_root
+                modified = True
             if image_spec.source_copy_mode is None:
                 image_spec.source_copy_mode = CopyFileDetection.LOADED_MODULES
+                modified = True
+
+    # If we modified the image spec, clear the cached 'id' property so it gets recomputed
+    # with the new values. This is important because the 'id' is used as the cache key for
+    # ImageBuildEngine.build's lru_cache, and if the id was computed before modification,
+    # it would have a different value than after modification, causing double builds.
+    if modified and "id" in image_spec.__dict__:
+        del image_spec.__dict__["id"]
 
 
 def get_registerable_container_image(img: Optional[Union[str, ImageSpec]], cfg: ImageConfig) -> str:
