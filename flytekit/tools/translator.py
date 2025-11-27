@@ -136,9 +136,20 @@ def get_serializable_task(
     )
 
     if isinstance(entity, PythonFunctionTask) and entity.execution_mode == PythonFunctionTask.ExecutionBehavior.DYNAMIC:
+        # Collect entities that are actually part of the workflow being serialized
+        # This includes entities already in entity_mapping and node_dependency_hints
+        relevant_entities = set(entity_mapping.keys())
+        if entity.node_dependency_hints is not None:
+            relevant_entities.update(entity.node_dependency_hints)
+
         for e in context_manager.FlyteEntities.entities:
             if isinstance(e, PythonAutoContainerTask):
-                # 1. Build the ImageSpec for all the entities that are inside the current context,
+                # Only build ImageSpecs for entities that are part of the workflow being serialized
+                # or explicitly listed as dependencies. This avoids building ImageSpecs for tasks
+                # from imported modules that are not actually used by the workflow.
+                if e not in relevant_entities and e is not entity:
+                    continue
+                # 1. Build the ImageSpec for the relevant entities,
                 # 2. Add images to the serialization context, so the dynamic task can look it up at runtime.
                 if isinstance(e.container_image, ImageSpec):
                     if settings.image_config.images is None:
