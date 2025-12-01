@@ -282,7 +282,7 @@ class ImageSpec:
     install_project: Optional[bool] = False
     use_depot: Optional[bool] = True
     uv_export_args: str = ""
-    vendor_local: Optional[bool] = False
+    vendor_local: Optional[bool] = True
     nix: Optional[bool] = False
 
     def __post_init__(self):

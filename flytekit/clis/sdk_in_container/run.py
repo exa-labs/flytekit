@@ -1,20 +1,20 @@
 import asyncio
+import fnmatch
 import importlib
 import inspect
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import typing
 import typing as t
 from dataclasses import dataclass, field, fields
 from typing import Iterator, get_args
-import fnmatch
-import shutil
-import toml
 
 import rich_click as click
+import toml
 import yaml
 from click import Context
 from mashumaro.codecs.json import JSONEncoder
@@ -71,8 +71,8 @@ from flytekit.remote import (
 from flytekit.remote.executions import FlyteWorkflowExecution
 from flytekit.tools import module_loader
 from flytekit.tools.fast_registration import FastPackageOptions
-from flytekit.tools.script_mode import _find_project_root, compress_scripts, get_all_modules, ls_files
 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
+from flytekit.tools.script_mode import _find_project_root, compress_scripts, get_all_modules, ls_files
 from flytekit.tools.translator import Options
 
 
@@ -323,7 +323,7 @@ class RunLevelParams(PyFlyteParams):
             param_decls=["--vendor-local"],
             required=False,
             is_flag=True,
-            default=False,
+            default=True,
             show_default=True,
             help="Vendor local packages from [tool.uv.sources] into a staged directory before packaging.",
         )
@@ -887,21 +887,27 @@ def run_command(ctx: click.Context, entity: typing.Union[PythonFunctionWorkflow,
 
             with context_manager.FlyteContextManager.with_context(remote.context.new_builder()):
                 show_files = run_level_params.verbose > 0
-                copy_style = CopyFileDetection.ALL if run_level_params.copy_all or run_level_params.vendor_local else run_level_params.copy
+                copy_style = (
+                    CopyFileDetection.ALL
+                    if run_level_params.copy_all or run_level_params.vendor_local
+                    else run_level_params.copy
+                )
 
                 fast_package_options = FastPackageOptions(
                     [],
                     copy_style=copy_style,
                     show_files=show_files,
                 )
-                
+
                 if run_level_params.vendor_local:
                     with tempfile.TemporaryDirectory() as staging_dir:
                         staging_root = pathlib.Path(staging_dir)
                         _copy_project_tree(run_level_params.computed_params.project_root, staging_root)
 
                         start = pathlib.Path(run_level_params.computed_params.project_root).resolve()
-                        pyproj_root = next((d for d in [start] + list(start.parents) if (d / "pyproject.toml").exists()), start)
+                        pyproj_root = next(
+                            (d for d in [start] + list(start.parents) if (d / "pyproject.toml").exists()), start
+                        )
                         _vendor_uv_sources(pyproj_root, staging_root)
 
                         remote_entity = remote.register_script(
