@@ -390,6 +390,11 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
                 if dependency["name"] not in vendored_package_names:
                     root_package["dependencies"].append(dependency)
 
+            for optional_dependencies in package.get("optional-dependencies", {}).values():
+                for optional_dependency in optional_dependencies:
+                    if optional_dependency["name"] not in vendored_package_names:
+                        root_package["dependencies"].append(optional_dependency)
+
             for requirement in package.get("metadata", {}).get("requires-dist", []):
                 if requirement["name"] not in vendored_package_names:
                     if requirement["name"] in non_vendored_package_map:
