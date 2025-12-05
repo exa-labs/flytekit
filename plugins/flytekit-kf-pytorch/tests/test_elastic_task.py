@@ -310,3 +310,138 @@ def test_recoverable_exception_timestamp() -> None:
         test_task()
 
     assert e.value.timestamp is not None
+
+
+def test_elastic_task_type_override():
+    """Test that task_type changes correctly when overriding nnodes."""
+    # Create a task with nnodes=2 (multi-node)
+    @task(task_config=Elastic(nnodes=2, nproc_per_node=1))
+    def multi_node_task(x: int) -> int:
+        return x * 2
+
+    # Verify initial task type is "pytorch" for multi-node
+    assert multi_node_task.task_type == "pytorch"
+    
+    @workflow
+    def test_override_workflow() -> int:
+        # Override with nnodes=1 (single-node)
+        return multi_node_task(x=5).with_overrides(
+            task_config=Elastic(nnodes=1, nproc_per_node=1)
+        )
+    
+    # Get the workflow node
+    node = test_override_workflow.nodes[0]
+    
+    # Verify that the task config was updated
+    assert node.flyte_entity._task_config.nnodes == 1
+    
+    # Verify that task_type now reflects single-node execution
+    assert node.flyte_entity.task_type == "python-task"
+    
+    # Test the opposite direction: single-node to multi-node
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=1))
+    def single_node_task(x: int) -> int:
+        return x * 3
+    
+    # Verify initial task type is "python-task" for single-node
+    assert single_node_task.task_type == "python-task"
+    
+    @workflow
+    def test_override_workflow2() -> int:
+        # Override with nnodes=2 (multi-node)
+        return single_node_task(x=5).with_overrides(
+            task_config=Elastic(nnodes=2, nproc_per_node=1)
+        )
+    
+    # Get the workflow node
+    node2 = test_override_workflow2.nodes[0]
+    
+    # Verify that the task config was updated
+    assert node2.flyte_entity._task_config.nnodes == 2
+    
+    # Verify that task_type now reflects multi-node execution
+    assert node2.flyte_entity.task_type == "pytorch"
+
+
+def test_elastic_task_type_with_string_nnodes():
+    """Test that task_type works correctly with string nnodes values."""
+    # Test with "1" string value
+    @task(task_config=Elastic(nnodes="1", nproc_per_node=1))
+    def single_node_str_task(x: int) -> int:
+        return x * 2
+    
+    assert single_node_str_task.task_type == "python-task"
+    
+    # Test with "1:1" string value (min and max both 1)
+    @task(task_config=Elastic(nnodes="1:1", nproc_per_node=1))
+    def single_node_range_task(x: int) -> int:
+        return x * 2
+    
+    assert single_node_range_task.task_type == "python-task"
+    
+    # Test with "1:4" string value (elastic range)
+    @task(task_config=Elastic(nnodes="1:4", nproc_per_node=1))
+    def elastic_range_task(x: int) -> int:
+        return x * 2
+    
+    assert elastic_range_task.task_type == "pytorch"
+    
+    # Test override from "2:4" to "1"
+    @task(task_config=Elastic(nnodes="2:4", nproc_per_node=1))
+    def multi_range_task(x: int) -> int:
+        return x * 2
+    
+    assert multi_range_task.task_type == "pytorch"
+    
+    @workflow
+    def test_string_override_workflow() -> int:
+        # Override with string "1"
+        return multi_range_task(x=5).with_overrides(
+            task_config=Elastic(nnodes="1", nproc_per_node=1)
+        )
+    
+    node = test_string_override_workflow.nodes[0]
+    assert node.flyte_entity._task_config.nnodes == "1"
+    assert node.flyte_entity.task_type == "python-task"
+
+
+def test_elastic_single_node_execution():
+    """Test that single-node tasks execute without elastic launch."""
+    import os
+    from unittest.mock import patch, MagicMock
+    
+    # Create a simple task function
+    def simple_task(x: int) -> int:
+        return x * 2
+    
+    # Test with nnodes=1 (should not use elastic_launch)
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=1))
+    def single_node_task(x: int) -> int:
+        return simple_task(x)
+    
+    # Mock elastic_launch to ensure it's not called
+    with patch('torch.distributed.launcher.api.elastic_launch') as mock_elastic_launch:
+        # Execute the task
+        result = single_node_task.execute(x=5)
+        
+        # Verify the result is correct
+        assert result == 10
+        
+        # Verify elastic_launch was NOT called
+        mock_elastic_launch.assert_not_called()
+    
+    # Test with nnodes=2 (should use elastic_launch)
+    @task(task_config=Elastic(nnodes=2, nproc_per_node=1))
+    def multi_node_task(x: int) -> int:
+        return simple_task(x)
+    
+    # Mock elastic_launch for multi-node case
+    mock_result = MagicMock()
+    mock_result.return_value = {0: MagicMock(return_value=20, decks=[], om=None)}
+    
+    with patch('torch.distributed.launcher.api.elastic_launch', return_value=mock_result) as mock_elastic_launch:
+        # Execute the task (this will use mocked elastic_launch)
+        result = multi_node_task.execute(x=10)
+        
+        # Verify elastic_launch WAS called for multi-node
+        mock_elastic_launch.assert_called_once()

@@ -3,34 +3,60 @@ This Plugin adds the capability of running distributed pytorch training to Flyte
 Kubernetes. It leverages `Pytorch Job <https://github.com/kubeflow/pytorch-operator>`_ Plugin from kubeflow.
 """
 
+import logging
 import os
+import sys
+
+# Force unbuffered output for immediate visibility
+sys.stdout.flush()
+os.environ['PYTHONUNBUFFERED'] = '1'
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
 
+import cloudpickle
+import flytekit
 from flyteidl.plugins.kubeflow import common_pb2 as kubeflow_common
 from flyteidl.plugins.kubeflow import pytorch_pb2 as pytorch_task
 from google.protobuf.json_format import MessageToDict
 
-import flytekit
-from flytekit import PythonFunctionTask, Resources, lazy_module
+from flytekit import FlyteContextManager, PythonFunctionTask, Resources, lazy_module, task
 from flytekit.configuration import SerializationSettings
-from flytekit.core.context_manager import FlyteContextManager, OutputMetadata
+from flytekit.core.base_task import PythonTask
+from flytekit.core.context_manager import FlyteContext, OutputMetadata, OutputMetadataTracker
 from flytekit.core.pod_template import PodTemplate
 from flytekit.core.resources import convert_resources_to_resource_model
-from flytekit.exceptions.user import (
-    FlyteRecoverableException,
-    FlyteUserRuntimeException,
-)
+from flytekit.exceptions.base import FlyteRecoverableException
+from flytekit.exceptions.user import FlyteUserRuntimeException
 from flytekit.extend import IgnoreOutputs, TaskPlugins
-from flytekit.loggers import logger
+from flytekit.models import task as _task_models
 
-from .error_handling import create_recoverable_error_file, is_recoverable_worker_error
+from .error_handling import is_recoverable_worker_error
 from .pod_template import add_shared_mem_volume_to_pod_template
 
-cloudpickle = lazy_module("cloudpickle")
+pd = lazy_module("pandas")
 
 TORCH_IMPORT_ERROR_MESSAGE = "PyTorch is not installed. Please install `flytekitplugins-kfpytorch['elastic']`."
+
+# Configure logger to show INFO level messages
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Add console handler if not already present
+if not logger.handlers:
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('[%(levelname)s] %(asctime)s - flytekitplugins.kfpytorch - %(message)s')
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+# Force immediate output
+logger.info(f"PyTorch Elastic plugin logger initialized")
+
+# Version marker for debugging
+PYTORCH_ELASTIC_FIX_VERSION = "1.0-nnodes-override-fix"
+print(f"[PYTORCH_ELASTIC] Plugin loaded with fix version: {PYTORCH_ELASTIC_FIX_VERSION}")
 
 
 @dataclass
@@ -138,6 +164,17 @@ class Elastic(object):
     Please see https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html for potential performance improvements.
     To change `OMP_NUM_THREADS`, specify it in the environment dict of the flytekit task decorator or via `pyflyte run --env`.
 
+    .. note::
+
+        The task type (and execution backend) is dynamically determined based on the `nnodes` value:
+        
+        - When `nnodes=1`: Task runs as a standalone pod (task_type="python-task")
+        - When `nnodes>1`: Task runs as a PyTorchJob via Kubeflow operator (task_type="pytorch")
+        
+        This behavior is preserved even when using `with_overrides()` to change the task configuration.
+        For example, a task created with `nnodes=2` can be overridden to `nnodes=1` and will correctly
+        execute as a standalone pod instead of a PyTorchJob.
+
     Args:
         nnodes (Union[int, str]): Number of nodes, or the range of nodes in form <minimum_nodes>:<maximum_nodes>.
         nproc_per_node (str): Number of workers per node.
@@ -165,6 +202,11 @@ class Elastic(object):
     rdzv_configs: Dict[str, Any] = field(default_factory=lambda: {"timeout": 900, "join_timeout": 900})
     increase_shared_mem: bool = True
     run_policy: Optional[RunPolicy] = None
+
+    def __repr__(self) -> str:
+        """String representation for better logging."""
+        return (f"Elastic(nnodes={self.nnodes}, nproc_per_node={self.nproc_per_node}, "
+                f"start_method={self.start_method}, max_restarts={self.max_restarts})")
 
 
 class PyTorchFunctionTask(PythonFunctionTask[PyTorch]):
@@ -309,17 +351,38 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     """
     Plugin for distributed training with torch elastic/torchrun (see
     https://pytorch.org/docs/stable/elastic/run.html).
+    
+    This task type dynamically adjusts its execution behavior based on the `nnodes` configuration:
+    
+    - When `nnodes=1`: Executes as a regular Python task without elastic launch, avoiding 
+      unnecessary overhead and rendezvous timeouts.
+    - When `nnodes>1`: Uses torch elastic launch for distributed execution across multiple nodes.
+    
+    This behavior is preserved even when using `with_overrides()` to change the configuration,
+    allowing seamless switching between single-node and multi-node execution modes.
     """
 
     _ELASTIC_TASK_TYPE = "pytorch"
     _ELASTIC_TASK_TYPE_STANDALONE = "python-task"
 
     def __init__(self, task_config: Elastic, task_function: Callable, **kwargs):
-        task_type = self._ELASTIC_TASK_TYPE_STANDALONE if task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
+        # Store initial task type based on initial config
+        # Handle both int and string nnodes values
+        nnodes = task_config.nnodes
+        print(f"[PYTORCH_ELASTIC] __init__: nnodes={nnodes}, type={type(nnodes)}")
+        
+        if isinstance(nnodes, int):
+            initial_task_type = self._ELASTIC_TASK_TYPE_STANDALONE if nnodes == 1 else self._ELASTIC_TASK_TYPE
+        else:
+            # For string values like "1:4", check if it's "1" or "1:1"
+            nnodes_str = str(nnodes)
+            initial_task_type = self._ELASTIC_TASK_TYPE_STANDALONE if nnodes_str in ["1", "1:1"] else self._ELASTIC_TASK_TYPE
+        
+        print(f"[PYTORCH_ELASTIC] __init__: initial_task_type={initial_task_type}")
 
         super(PytorchElasticFunctionTask, self).__init__(
             task_config=task_config,
-            task_type=task_type,
+            task_type=initial_task_type,
             task_function=task_function,
             # task_type_version controls the version of the task template, do not change
             task_type_version=1,
@@ -340,7 +403,31 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
                 self.pod_template = PodTemplate()
             add_shared_mem_volume_to_pod_template(self.pod_template)
 
-        self._task_config = task_config
+    @property
+    def task_type(self) -> str:
+        """
+        Dynamically determine task type based on current nnodes configuration.
+        This ensures that task type updates when task_config is overridden.
+        """
+        print(f"[PYTORCH_ELASTIC] task_type property accessed")
+        if self._task_config:
+            # Handle both int and string nnodes values
+            nnodes = self._task_config.nnodes
+            print(f"[PYTORCH_ELASTIC] task_type property: checking nnodes={nnodes}, type={type(nnodes)}")
+            
+            if isinstance(nnodes, int):
+                if nnodes == 1:
+                    print(f"[PYTORCH_ELASTIC] task_type property: returning STANDALONE (nnodes=1)")
+                    return self._ELASTIC_TASK_TYPE_STANDALONE
+            else:
+                # For string values like "1:4", check if it's "1" or "1:1"
+                nnodes_str = str(nnodes)
+                if nnodes_str == "1" or nnodes_str == "1:1":
+                    print(f"[PYTORCH_ELASTIC] task_type property: returning STANDALONE (nnodes_str={nnodes_str})")
+                    return self._ELASTIC_TASK_TYPE_STANDALONE
+        
+        print(f"[PYTORCH_ELASTIC] task_type property: returning ELASTIC (multi-node)")
+        return self._ELASTIC_TASK_TYPE
 
     def _execute(self, **kwargs) -> Any:
         """
@@ -352,10 +439,13 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         Raises:
             FlyteRecoverableException: If the first exception raised in the local worker group is or
                 inherits from `FlyteRecoverableException`.
-            RuntimeError: If the first exception raised in the local worker group is not and does not
+            RuntimeError: The first exception raised in the local worker group is not and does not
                 inherit from `FlyteRecoverableException`.
             IgnoreOutputs: Raised when the task is successful in any worker group with index > 0.
         """
+        print(f"[PYTORCH_ELASTIC] _execute: ENTERED ELASTIC LAUNCH METHOD")
+        print(f"[PYTORCH_ELASTIC] _execute: task_config.nnodes={self._task_config.nnodes}")
+        
         try:
             from torch.distributed import run
             from torch.distributed.launcher.api import LaunchConfig, elastic_launch
@@ -363,19 +453,24 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
 
         nnodes_str = os.environ.get("PET_NNODES", str(self._task_config.nnodes))
+        print(f"[PYTORCH_ELASTIC] _execute: PET_NNODES env var={os.environ.get('PET_NNODES')}, using nnodes_str={nnodes_str}")
         min_nodes, max_nodes = run.parse_min_max_nnodes(nnodes_str)
+        print(f"[PYTORCH_ELASTIC] _execute: parsed min_nodes={min_nodes}, max_nodes={max_nodes}")
 
         nproc_per_node = int(os.environ.get("PET_NPROC_PER_NODE", self._task_config.nproc_per_node))
         max_restarts = int(os.environ.get("PET_MAX_RESTARTS", self._task_config.max_restarts))
         monitor_interval = int(os.environ.get("PET_MONITOR_INTERVAL", self._task_config.monitor_interval))
         rdzv_endpoint = os.environ.get("PET_RDZV_ENDPOINT", "localhost:0")
+        
+        print(f"[PYTORCH_ELASTIC] _execute: nproc_per_node={nproc_per_node}, max_restarts={max_restarts}")
+        print(f"[PYTORCH_ELASTIC] _execute: monitor_interval={monitor_interval}, rdzv_endpoint={rdzv_endpoint}")
 
         # If OMP_NUM_THREADS is not set, set it to 1 to avoid overloading the system.
         # Doing so to copy the default behavior of torchrun.
         # See https://github.com/pytorch/pytorch/blob/eea4ece256d74c6f25c1f4eab37b3f2f4aeefd4d/torch/distributed/run.py#L791
         if "OMP_NUM_THREADS" not in os.environ and nproc_per_node > 1:
             omp_num_threads = 1
-            logger.warning(
+            print(
                 "\n*****************************************\n"
                 "Setting OMP_NUM_THREADS environment variable for each process to be "
                 "%s in default, to avoid your system being overloaded, "
@@ -398,6 +493,13 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             monitor_interval=monitor_interval,
             start_method=self._task_config.start_method,
         )
+        
+        print(f"[PYTORCH_ELASTIC] _execute: LaunchConfig created with:")
+        print(f"  - min_nodes={min_nodes}, max_nodes={max_nodes}")
+        print(f"  - nproc_per_node={nproc_per_node}")
+        print(f"  - rdzv_backend={self.rdzv_backend}")
+        print(f"  - rdzv_endpoint={rdzv_endpoint}")
+        print(f"  - start_method={self._task_config.start_method}")
 
         if self._task_config.start_method == "spawn":
             """
@@ -503,44 +605,100 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
 
         Handles the exception scope for the `_execute` method.
         """
-
+        print(f"[PYTORCH_ELASTIC] ========== EXECUTE METHOD CALLED ==========")
+        print(f"PytorchElasticFunctionTask.execute called")
+        print(f"Current task_config: {self._task_config}")
+        print(f"Current task_type: {self.task_type}")
+        
+        print(f"[PYTORCH_ELASTIC] execute: task_config={self._task_config}")
+        print(f"[PYTORCH_ELASTIC] execute: task_type={self.task_type}")
+        
+        # Log relevant environment variables
+        print(f"[PYTORCH_ELASTIC] Environment: PET_NNODES={os.environ.get('PET_NNODES', 'NOT SET')}")
+        
+        # Check if this is a single-node configuration
+        nnodes = self._task_config.nnodes
+        is_single_node = False
+        if isinstance(nnodes, int):
+            is_single_node = (nnodes == 1)
+            print(f"[PYTORCH_ELASTIC] execute: nnodes is int={nnodes}, is_single_node={is_single_node}")
+        else:
+            # For string values like "1:4", check if it's "1" or "1:1"
+            nnodes_str = str(nnodes)
+            is_single_node = nnodes_str in ["1", "1:1"]
+            print(f"[PYTORCH_ELASTIC] execute: nnodes is str={nnodes_str}, is_single_node={is_single_node}")
+        
+        # For single-node execution, bypass elastic launch and run directly
+        if is_single_node:
+            # Run as a regular Python task without elastic launch
+            print(f"[PYTORCH_ELASTIC] *** SINGLE-NODE DETECTED - BYPASSING ELASTIC LAUNCH ***")
+            try:
+                # Get parent class info
+                parent_class = super().__class__
+                print(f"[PYTORCH_ELASTIC] execute: Parent class is {parent_class}")
+                print(f"[PYTORCH_ELASTIC] execute: Calling {parent_class.__name__}.execute()")
+                result = super().execute(**kwargs)
+                print(f"[PYTORCH_ELASTIC] execute: Parent execute returned successfully")
+                return result
+            except Exception as e:
+                print(f"[PYTORCH_ELASTIC] execute: ERROR in parent execute: {type(e).__name__}: {e}")
+                raise
+        
+        # For multi-node execution, use elastic launch
+        print(f"[PYTORCH_ELASTIC] *** MULTI-NODE DETECTED - USING ELASTIC LAUNCH ***")
         return self._execute(**kwargs)
 
     def get_custom(self, settings: SerializationSettings) -> Optional[Dict[str, Any]]:
-        if self._task_config.nnodes == 1:
-            """
-            Torch elastic distributed training is executed in a normal k8s pod so that this
-            works without the kubeflow train operator.
-            """
-            return super().get_custom(settings)
+        print(f"[PYTORCH_ELASTIC] get_custom: Called for serialization")
+        print(f"[PYTORCH_ELASTIC] get_custom: Current task_type property returns: {self.task_type}")
+        print(f"[PYTORCH_ELASTIC] get_custom: settings={settings}")
+        
+        # Always return ElasticConfig, even for single-node
+        # This ensures the task specification is valid
+        from flyteidl.plugins.kubeflow.pytorch_pb2 import ElasticConfig
+        
+        try:
+            from torch.distributed import run
+        except ImportError:
+            raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
+        
+        # Check if this is a single-node configuration
+        nnodes = self._task_config.nnodes
+        is_single_node = False
+        if isinstance(nnodes, int):
+            is_single_node = (nnodes == 1)
         else:
-            from flyteidl.plugins.kubeflow.pytorch_pb2 import ElasticConfig
-
-            try:
-                from torch.distributed import run
-            except ImportError:
-                raise ImportError(TORCH_IMPORT_ERROR_MESSAGE)
-
-            min_nodes, max_nodes = run.parse_min_max_nnodes(str(self._task_config.nnodes))
-
-            elastic_config = ElasticConfig(
-                rdzv_backend=self.rdzv_backend,
-                min_replicas=min_nodes,
-                max_replicas=max_nodes,
-                nproc_per_node=self._task_config.nproc_per_node,
-                max_restarts=self._task_config.max_restarts,
-            )
-            run_policy = (
-                _convert_run_policy_to_flyte_idl(self._task_config.run_policy) if self._task_config.run_policy else None
-            )
-            job = pytorch_task.DistributedPyTorchTrainingTask(
-                worker_replicas=pytorch_task.DistributedPyTorchTrainingReplicaSpec(
-                    replicas=max_nodes,
-                ),
-                elastic_config=elastic_config,
-                run_policy=run_policy,
-            )
-            return MessageToDict(job)
+            # For string values like "1:4", check if it's "1" or "1:1"
+            nnodes_str = str(nnodes)
+            is_single_node = nnodes_str in ["1", "1:1"]
+        
+        print(f"[PYTORCH_ELASTIC] get_custom: nnodes={nnodes}, is_single_node={is_single_node}")
+        
+        min_nodes, max_nodes = run.parse_min_max_nnodes(str(self._task_config.nnodes))
+        
+        elastic_config = ElasticConfig(
+            rdzv_backend=self.rdzv_backend,
+            min_replicas=min_nodes,
+            max_replicas=max_nodes,
+            nproc_per_node=self._task_config.nproc_per_node,
+            max_restarts=self._task_config.max_restarts,
+        )
+        run_policy = (
+            _convert_run_policy_to_flyte_idl(self._task_config.run_policy) if self._task_config.run_policy else None
+        )
+        
+        # For single-node, we still return a valid PyTorch job spec
+        # but it will execute differently based on task_type
+        job = pytorch_task.DistributedPyTorchTrainingTask(
+            worker_replicas=pytorch_task.DistributedPyTorchTrainingReplicaSpec(
+                replicas=max_nodes,
+            ),
+            elastic_config=elastic_config,
+            run_policy=run_policy,
+        )
+        
+        print(f"[PYTORCH_ELASTIC] get_custom: Returning PyTorch job spec for {'single' if is_single_node else 'multi'}-node")
+        return MessageToDict(job)
 
 
 # Register the PytorchElastic Plugin into the flytekit core plugin system
