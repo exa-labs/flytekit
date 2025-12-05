@@ -82,6 +82,7 @@ def get_authenticator(cfg: PlatformConfig, cfg_store: ClientConfigStore) -> Auth
             http_proxy_url=cfg.http_proxy_url,
             verify=verify,
             session=session,
+            token_endpoint_override=cfg.token_endpoint_override,
         )
     elif cfg_auth == AuthType.EXTERNAL_PROCESS or cfg_auth == AuthType.EXTERNALCOMMAND:
         client_cfg = None
