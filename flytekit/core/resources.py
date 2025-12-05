@@ -133,8 +133,10 @@ def pod_spec_from_resources(
         return k8s_pod_resources
 
     # Check if GPU is requested in either requests or limits before converting to k8s resources
-    gpu_requested = (requests and requests.gpu is not None) or (limits and limits.gpu is not None)
-    
+    gpu_requested = (requests and requests.gpu is not None and int(requests.gpu) > 0) or (
+        limits and limits.gpu is not None and int(limits.gpu) > 0
+    )
+
     requests = _construct_k8s_pods_resources(resources=requests, k8s_gpu_resource_key=k8s_gpu_resource_key)
     limits = _construct_k8s_pods_resources(resources=limits, k8s_gpu_resource_key=k8s_gpu_resource_key)
 
@@ -146,9 +148,7 @@ def pod_spec_from_resources(
     if gpu_requested:
         # Use the same key as the GPU resource key for consistency
         # This allows pods requesting GPUs to be scheduled on nodes with GPU taints
-        tolerations.append(
-            V1Toleration(key="gpu", operator="Equal", value="true", effect="NoSchedule")
-        )
+        tolerations.append(V1Toleration(key="gpu", operator="Equal", value="true", effect="NoSchedule"))
 
     requests = requests or limits
     limits = limits or requests
