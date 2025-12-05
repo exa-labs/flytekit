@@ -196,7 +196,6 @@ RUN --mount=type=bind,source=.,target=/build/ \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
     nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
     --image-parallel-copies 32 \
-    --debug \
     --dest-creds "AWS:$ECR_TOKEN"
 """)
 
