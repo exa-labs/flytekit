@@ -677,7 +677,8 @@ def create_docker_context(image_spec: ImageSpec, tmp_dir: Path):
 
     env = " ".join(f"{k}={v}" for k, v in env_dict.items())
 
-    apt_packages = []
+    # Always include git for pip/uv to install packages from git URLs (e.g., git+https://...)
+    apt_packages = ["git"]
     if image_spec.apt_packages:
         apt_packages.extend(image_spec.apt_packages)
 
