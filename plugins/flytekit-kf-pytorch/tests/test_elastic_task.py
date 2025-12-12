@@ -310,3 +310,54 @@ def test_recoverable_exception_timestamp() -> None:
         test_task()
 
     assert e.value.timestamp is not None
+
+
+def test_task_type_dynamic_computation() -> None:
+    """Test that task_type is dynamically computed based on current _task_config.nnodes.
+
+    This test verifies the fix for a bug where overriding a single-node Elastic config
+    to multi-node via with_overrides would not change the task_type, causing the task
+    to still run as a standalone pod instead of a PyTorchJob.
+    """
+    # Create a task with single-node config (nnodes=1)
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=1))
+    def single_node_task():
+        pass
+
+    # Initially, task_type should be "python-task" for single-node
+    assert single_node_task.task_type == "python-task"
+
+    # Simulate what with_overrides does: update _task_config
+    single_node_task._task_config = Elastic(nnodes=2, nproc_per_node=2)
+
+    # After updating _task_config to multi-node, task_type should be "pytorch"
+    assert single_node_task.task_type == "pytorch"
+
+    # Verify the reverse: multi-node to single-node
+    @task(task_config=Elastic(nnodes=2, nproc_per_node=2))
+    def multi_node_task():
+        pass
+
+    # Initially, task_type should be "pytorch" for multi-node
+    assert multi_node_task.task_type == "pytorch"
+
+    # Update to single-node config
+    multi_node_task._task_config = Elastic(nnodes=1, nproc_per_node=1)
+
+    # After updating _task_config to single-node, task_type should be "python-task"
+    assert multi_node_task.task_type == "python-task"
+
+
+def test_task_type_with_string_nnodes() -> None:
+    """Test that task_type handles string nnodes (e.g., '1:2' for elastic range)."""
+    # String nnodes like "1:2" means min 1, max 2 nodes - should be treated as multi-node
+    @task(task_config=Elastic(nnodes="1:2", nproc_per_node=1))
+    def elastic_range_task():
+        pass
+
+    # String nnodes != 1, so should be "pytorch"
+    assert elastic_range_task.task_type == "pytorch"
+
+    # Update to single-node
+    elastic_range_task._task_config = Elastic(nnodes=1, nproc_per_node=1)
+    assert elastic_range_task.task_type == "python-task"

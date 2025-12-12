@@ -309,6 +309,10 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     """
     Plugin for distributed training with torch elastic/torchrun (see
     https://pytorch.org/docs/stable/elastic/run.html).
+
+    The task_type property is dynamically computed based on the current _task_config.nnodes value.
+    This allows the task type to be correctly updated when task_config is overridden via with_overrides
+    in a dynamic task, enabling single-node configs to be overridden to multi-node configs.
     """
 
     _ELASTIC_TASK_TYPE = "pytorch"
@@ -341,6 +345,24 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             add_shared_mem_volume_to_pod_template(self.pod_template)
 
         self._task_config = task_config
+
+    @property
+    def task_type(self) -> str:
+        """
+        Dynamically compute task_type based on current _task_config.nnodes.
+
+        This property overrides the base class's task_type to ensure that when task_config
+        is modified via with_overrides (e.g., in a dynamic task), the task_type is correctly
+        updated to reflect the new configuration.
+
+        When nnodes == 1, returns "python-task" (standalone execution in a single pod).
+        When nnodes > 1, returns "pytorch" (PyTorchJob CRD for multi-node training).
+
+        This fixes a bug where overriding a single-node Elastic config to multi-node via
+        with_overrides would not change the task_type, causing the task to still run as
+        a standalone pod instead of a PyTorchJob.
+        """
+        return self._ELASTIC_TASK_TYPE_STANDALONE if self._task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
 
     def _execute(self, **kwargs) -> Any:
         """
