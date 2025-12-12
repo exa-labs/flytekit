@@ -361,3 +361,52 @@ def test_task_type_with_string_nnodes() -> None:
     # Update to single-node
     elastic_range_task._task_config = Elastic(nnodes=1, nproc_per_node=1)
     assert elastic_range_task.task_type == "python-task"
+
+
+def test_environment_includes_elastic_config() -> None:
+    """Test that environment property includes elastic config as environment variables.
+
+    This test verifies the fix for a bug where overriding nproc_per_node via with_overrides
+    would not change the number of processes for single-node elastic tasks. The fix adds
+    elastic config to environment variables so that _execute can read the current
+    (potentially overridden) values.
+    """
+    # Create a task with single-node config
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=1, max_restarts=3, monitor_interval=10))
+    def single_node_task():
+        pass
+
+    # Check that environment includes elastic config
+    env = single_node_task.environment
+    assert env["PET_NNODES"] == "1"
+    assert env["PET_NPROC_PER_NODE"] == "1"
+    assert env["PET_MAX_RESTARTS"] == "3"
+    assert env["PET_MONITOR_INTERVAL"] == "10"
+
+    # Simulate what with_overrides does: update _task_config
+    single_node_task._task_config = Elastic(nnodes=1, nproc_per_node=4, max_restarts=5, monitor_interval=20)
+
+    # After updating _task_config, environment should reflect the new values
+    env = single_node_task.environment
+    assert env["PET_NNODES"] == "1"
+    assert env["PET_NPROC_PER_NODE"] == "4"
+    assert env["PET_MAX_RESTARTS"] == "5"
+    assert env["PET_MONITOR_INTERVAL"] == "20"
+
+
+def test_environment_preserves_existing_env_vars() -> None:
+    """Test that environment property preserves existing environment variables."""
+    # Create a task with custom environment variables
+    @task(
+        task_config=Elastic(nnodes=1, nproc_per_node=2),
+        environment={"CUSTOM_VAR": "custom_value", "ANOTHER_VAR": "another_value"}
+    )
+    def task_with_env():
+        pass
+
+    # Check that both custom and elastic env vars are present
+    env = task_with_env.environment
+    assert env["CUSTOM_VAR"] == "custom_value"
+    assert env["ANOTHER_VAR"] == "another_value"
+    assert env["PET_NNODES"] == "1"
+    assert env["PET_NPROC_PER_NODE"] == "2"
