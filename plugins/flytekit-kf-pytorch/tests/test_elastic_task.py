@@ -310,3 +310,103 @@ def test_recoverable_exception_timestamp() -> None:
         test_task()
 
     assert e.value.timestamp is not None
+
+
+def test_task_type_dynamic_computation() -> None:
+    """Test that task_type is dynamically computed based on current _task_config.nnodes.
+
+    This test verifies the fix for a bug where overriding a single-node Elastic config
+    to multi-node via with_overrides would not change the task_type, causing the task
+    to still run as a standalone pod instead of a PyTorchJob.
+    """
+    # Create a task with single-node config (nnodes=1)
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=1))
+    def single_node_task():
+        pass
+
+    # Initially, task_type should be "python-task" for single-node
+    assert single_node_task.task_type == "python-task"
+
+    # Simulate what with_overrides does: update _task_config
+    single_node_task._task_config = Elastic(nnodes=2, nproc_per_node=2)
+
+    # After updating _task_config to multi-node, task_type should be "pytorch"
+    assert single_node_task.task_type == "pytorch"
+
+    # Verify the reverse: multi-node to single-node
+    @task(task_config=Elastic(nnodes=2, nproc_per_node=2))
+    def multi_node_task():
+        pass
+
+    # Initially, task_type should be "pytorch" for multi-node
+    assert multi_node_task.task_type == "pytorch"
+
+    # Update to single-node config
+    multi_node_task._task_config = Elastic(nnodes=1, nproc_per_node=1)
+
+    # After updating _task_config to single-node, task_type should be "python-task"
+    assert multi_node_task.task_type == "python-task"
+
+
+def test_task_type_with_string_nnodes() -> None:
+    """Test that task_type handles string nnodes (e.g., '1:2' for elastic range)."""
+    # String nnodes like "1:2" means min 1, max 2 nodes - should be treated as multi-node
+    @task(task_config=Elastic(nnodes="1:2", nproc_per_node=1))
+    def elastic_range_task():
+        pass
+
+    # String nnodes != 1, so should be "pytorch"
+    assert elastic_range_task.task_type == "pytorch"
+
+    # Update to single-node
+    elastic_range_task._task_config = Elastic(nnodes=1, nproc_per_node=1)
+    assert elastic_range_task.task_type == "python-task"
+
+
+def test_environment_includes_elastic_config() -> None:
+    """Test that environment property includes elastic config as environment variables.
+
+    This test verifies the fix for a bug where overriding nproc_per_node via with_overrides
+    would not change the number of processes for single-node elastic tasks. The fix adds
+    elastic config to environment variables so that _execute can read the current
+    (potentially overridden) values.
+    """
+    # Create a task with single-node config
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=1, max_restarts=3, monitor_interval=10))
+    def single_node_task():
+        pass
+
+    # Check that environment includes elastic config
+    env = single_node_task.environment
+    assert env["PET_NNODES"] == "1"
+    assert env["PET_NPROC_PER_NODE"] == "1"
+    assert env["PET_MAX_RESTARTS"] == "3"
+    assert env["PET_MONITOR_INTERVAL"] == "10"
+
+    # Simulate what with_overrides does: update _task_config
+    single_node_task._task_config = Elastic(nnodes=1, nproc_per_node=4, max_restarts=5, monitor_interval=20)
+
+    # After updating _task_config, environment should reflect the new values
+    env = single_node_task.environment
+    assert env["PET_NNODES"] == "1"
+    assert env["PET_NPROC_PER_NODE"] == "4"
+    assert env["PET_MAX_RESTARTS"] == "5"
+    assert env["PET_MONITOR_INTERVAL"] == "20"
+
+
+def test_environment_preserves_existing_env_vars() -> None:
+    """Test that environment property preserves existing environment variables."""
+    # Create a task with custom environment variables
+    @task(
+        task_config=Elastic(nnodes=1, nproc_per_node=2),
+        environment={"CUSTOM_VAR": "custom_value", "ANOTHER_VAR": "another_value"}
+    )
+    def task_with_env():
+        pass
+
+    # Check that both custom and elastic env vars are present
+    env = task_with_env.environment
+    assert env["CUSTOM_VAR"] == "custom_value"
+    assert env["ANOTHER_VAR"] == "another_value"
+    assert env["PET_NNODES"] == "1"
+    assert env["PET_NPROC_PER_NODE"] == "2"

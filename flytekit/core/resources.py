@@ -159,7 +159,10 @@ def pod_spec_from_resources(
         capacity_type = node_selector.get("capacity_type", None)
 
         if (cluster_name and cluster_name == "aws") or instance_type or capacity_type:
-            dns_policy = "Default"
+            # Note: We intentionally do NOT override dns_policy to "Default" here.
+            # Using "Default" breaks DNS resolution for short hostnames in non-default namespaces,
+            # which causes PyTorchJob multi-node elastic training to fail (C10d rendezvous can't resolve
+            # worker hostnames). The default "ClusterFirst" policy ensures proper DNS resolution.
             tolerations.append(
                 V1Toleration(key="cloud", operator="Equal", value="aws", effect="NoSchedule"),
             )

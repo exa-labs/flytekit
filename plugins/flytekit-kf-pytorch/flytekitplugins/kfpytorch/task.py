@@ -309,6 +309,10 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     """
     Plugin for distributed training with torch elastic/torchrun (see
     https://pytorch.org/docs/stable/elastic/run.html).
+
+    The task_type property is dynamically computed based on the current _task_config.nnodes value.
+    This allows the task type to be correctly updated when task_config is overridden via with_overrides
+    in a dynamic task, enabling single-node configs to be overridden to multi-node configs.
     """
 
     _ELASTIC_TASK_TYPE = "pytorch"
@@ -341,6 +345,51 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
             add_shared_mem_volume_to_pod_template(self.pod_template)
 
         self._task_config = task_config
+
+    @property
+    def task_type(self) -> str:
+        """
+        Dynamically compute task_type based on current _task_config.nnodes.
+
+        This property overrides the base class's task_type to ensure that when task_config
+        is modified via with_overrides (e.g., in a dynamic task), the task_type is correctly
+        updated to reflect the new configuration.
+
+        When nnodes == 1, returns "python-task" (standalone execution in a single pod).
+        When nnodes > 1, returns "pytorch" (PyTorchJob CRD for multi-node training).
+
+        This fixes a bug where overriding a single-node Elastic config to multi-node via
+        with_overrides would not change the task_type, causing the task to still run as
+        a standalone pod instead of a PyTorchJob.
+        """
+        return self._ELASTIC_TASK_TYPE_STANDALONE if self._task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
+
+    @property
+    def environment(self) -> Dict[str, str]:
+        """
+        Dynamically compute environment variables based on current _task_config.
+
+        This property overrides the base class's environment to include elastic-specific
+        configuration as environment variables. This ensures that when task_config is
+        modified via with_overrides (e.g., in a dynamic task), the elastic configuration
+        is correctly passed to the pod via environment variables.
+
+        For single-node elastic tasks (task_type="python-task"), the _execute method reads
+        these environment variables to configure torch elastic's LaunchConfig. Without this
+        override, the environment variables would not be set, and _execute would fall back
+        to the original _task_config values from the decorator, ignoring any overrides.
+
+        This fixes a bug where overriding nproc_per_node via with_overrides would not
+        change the number of processes for single-node elastic tasks.
+        """
+        env = self._environment.copy() if self._environment else {}
+        # Always include elastic config in environment variables so that _execute
+        # can read the current (potentially overridden) values
+        env["PET_NNODES"] = str(self._task_config.nnodes)
+        env["PET_NPROC_PER_NODE"] = str(self._task_config.nproc_per_node)
+        env["PET_MAX_RESTARTS"] = str(self._task_config.max_restarts)
+        env["PET_MONITOR_INTERVAL"] = str(self._task_config.monitor_interval)
+        return env
 
     def _execute(self, **kwargs) -> Any:
         """
