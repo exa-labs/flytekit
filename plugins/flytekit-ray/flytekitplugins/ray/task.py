@@ -166,6 +166,7 @@ class RayFunctionTask(PythonFunctionTask):
             runtime_env_yaml=runtime_env_yaml,
             ttl_seconds_after_finished=cfg.ttl_seconds_after_finished,
             shutdown_after_job_finishes=cfg.shutdown_after_job_finishes,
+            address=cfg.address,
         )
         return MessageToDict(ray_job.to_flyte_idl())
 
