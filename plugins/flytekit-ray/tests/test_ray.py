@@ -1,6 +1,7 @@
 import base64
 import json
 
+import pytest
 import ray
 import yaml
 
@@ -117,3 +118,92 @@ def test_ray_task():
 
     assert t1(a=3) == "5"
     assert ray.is_initialized()
+
+
+def test_ray_job_config_cluster_selector():
+    """Test RayJobConfig with cluster_selector for existing cluster mode."""
+    cluster_selector_config = RayJobConfig(
+        cluster_selector={"ray.io/cluster": "my-dev-cluster"},
+        runtime_env={"pip": ["numpy"]},
+    )
+
+    assert cluster_selector_config.cluster_selector == {"ray.io/cluster": "my-dev-cluster"}
+    assert cluster_selector_config.worker_node_config is None
+    assert cluster_selector_config.head_node_config is None
+
+
+def test_ray_job_config_mutual_exclusivity():
+    """Test that cluster_selector and worker_node_config are mutually exclusive."""
+    with pytest.raises(ValueError, match="cluster_selector and worker_node_config are mutually exclusive"):
+        RayJobConfig(
+            cluster_selector={"ray.io/cluster": "my-dev-cluster"},
+            worker_node_config=[
+                WorkerNodeConfig(group_name="test_group", replicas=3)
+            ],
+        )
+
+
+def test_ray_job_config_requires_one_mode():
+    """Test that either cluster_selector or worker_node_config must be provided."""
+    with pytest.raises(ValueError, match="Either cluster_selector or worker_node_config must be provided"):
+        RayJobConfig()
+
+
+def test_ray_job_model_cluster_selector():
+    """Test RayJob model with cluster_selector."""
+    ray_job = RayJob(
+        cluster_selector={"ray.io/cluster": "my-dev-cluster"},
+        runtime_env_yaml="pip:\n- numpy\n",
+        shutdown_after_job_finishes=False,
+    )
+
+    assert ray_job.cluster_selector == {"ray.io/cluster": "my-dev-cluster"}
+    assert ray_job.ray_cluster is None
+
+    pb = ray_job.to_flyte_idl()
+    assert pb.cluster_selector == {"ray.io/cluster": "my-dev-cluster"}
+
+
+def test_ray_job_model_mutual_exclusivity():
+    """Test that RayJob model enforces mutual exclusivity."""
+    with pytest.raises(ValueError, match="ray_cluster and cluster_selector are mutually exclusive"):
+        RayJob(
+            ray_cluster=RayCluster(worker_group_spec=[]),
+            cluster_selector={"ray.io/cluster": "my-dev-cluster"},
+        )
+
+
+def test_ray_job_model_requires_one_mode():
+    """Test that RayJob model requires either ray_cluster or cluster_selector."""
+    with pytest.raises(ValueError, match="Either ray_cluster or cluster_selector must be provided"):
+        RayJob()
+
+
+def test_ray_task_with_cluster_selector():
+    """Test Ray task with cluster_selector configuration."""
+    cluster_selector_config = RayJobConfig(
+        cluster_selector={"ray.io/cluster": "my-dev-cluster"},
+        runtime_env={"pip": ["numpy"]},
+    )
+
+    @task(task_config=cluster_selector_config)
+    def t2(a: int) -> str:
+        return str(a + 1)
+
+    assert t2.task_config is not None
+    assert t2.task_config.cluster_selector == {"ray.io/cluster": "my-dev-cluster"}
+    assert t2.task_type == "ray"
+
+    default_img = Image(name="default", fqn="test", tag="tag")
+    settings = SerializationSettings(
+        project="proj",
+        domain="dom",
+        version="123",
+        image_config=ImageConfig(default_image=default_img, images=[default_img]),
+        env={},
+    )
+
+    custom = t2.get_custom(settings)
+    assert "clusterSelector" in custom
+    assert custom["clusterSelector"] == {"ray.io/cluster": "my-dev-cluster"}
+    assert "rayCluster" not in custom or custom.get("rayCluster") is None

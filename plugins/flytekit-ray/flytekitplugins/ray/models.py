@@ -211,24 +211,39 @@ class RayCluster(_common.FlyteIdlEntity):
 class RayJob(_common.FlyteIdlEntity):
     """
     Models _ray_pb2.RayJob
+
+    Supports two modes:
+    1. Create a new RayCluster: Provide ray_cluster spec
+    2. Use existing RayCluster: Provide cluster_selector labels (mutually exclusive with ray_cluster)
+
+    When cluster_selector is provided, the RayJob will submit to an existing RayCluster
+    that matches the selector labels instead of creating a new one. This enables
+    long-lived clusters for faster iteration during development.
     """
 
     def __init__(
         self,
-        ray_cluster: RayCluster,
+        ray_cluster: typing.Optional[RayCluster] = None,
         runtime_env: typing.Optional[str] = None,
         runtime_env_yaml: typing.Optional[str] = None,
         ttl_seconds_after_finished: typing.Optional[int] = None,
         shutdown_after_job_finishes: bool = False,
+        cluster_selector: typing.Optional[typing.Dict[str, str]] = None,
     ):
+        if ray_cluster is not None and cluster_selector is not None:
+            raise ValueError("ray_cluster and cluster_selector are mutually exclusive")
+        if ray_cluster is None and cluster_selector is None:
+            raise ValueError("Either ray_cluster or cluster_selector must be provided")
+
         self._ray_cluster = ray_cluster
         self._runtime_env = runtime_env
         self._runtime_env_yaml = runtime_env_yaml
         self._ttl_seconds_after_finished = ttl_seconds_after_finished
         self._shutdown_after_job_finishes = shutdown_after_job_finishes
+        self._cluster_selector = cluster_selector
 
     @property
-    def ray_cluster(self) -> RayCluster:
+    def ray_cluster(self) -> typing.Optional[RayCluster]:
         return self._ray_cluster
 
     @property
@@ -241,29 +256,39 @@ class RayJob(_common.FlyteIdlEntity):
 
     @property
     def ttl_seconds_after_finished(self) -> typing.Optional[int]:
-        # ttl_seconds_after_finished specifies the number of seconds after which the RayCluster will be deleted after the RayJob finishes.
         return self._ttl_seconds_after_finished
 
     @property
     def shutdown_after_job_finishes(self) -> bool:
-        # shutdown_after_job_finishes specifies whether the RayCluster should be deleted after the RayJob finishes.
         return self._shutdown_after_job_finishes
+
+    @property
+    def cluster_selector(self) -> typing.Optional[typing.Dict[str, str]]:
+        """
+        Label selector to match an existing RayCluster.
+        When set, the RayJob submits to an existing cluster instead of creating a new one.
+        """
+        return self._cluster_selector
 
     def to_flyte_idl(self) -> _ray_pb2.RayJob:
         return _ray_pb2.RayJob(
-            ray_cluster=self.ray_cluster.to_flyte_idl(),
+            ray_cluster=self.ray_cluster.to_flyte_idl() if self.ray_cluster else None,
             runtime_env=self.runtime_env,
             runtime_env_yaml=self.runtime_env_yaml,
             ttl_seconds_after_finished=self.ttl_seconds_after_finished,
             shutdown_after_job_finishes=self.shutdown_after_job_finishes,
+            cluster_selector=self.cluster_selector if self.cluster_selector else {},
         )
 
     @classmethod
     def from_flyte_idl(cls, proto: _ray_pb2.RayJob):
+        cluster_selector = dict(proto.cluster_selector) if proto.cluster_selector else None
+        ray_cluster = RayCluster.from_flyte_idl(proto.ray_cluster) if proto.ray_cluster else None
         return cls(
-            ray_cluster=RayCluster.from_flyte_idl(proto.ray_cluster) if proto.ray_cluster else None,
+            ray_cluster=ray_cluster,
             runtime_env=proto.runtime_env,
             runtime_env_yaml=proto.runtime_env_yaml,
             ttl_seconds_after_finished=proto.ttl_seconds_after_finished,
             shutdown_after_job_finishes=proto.shutdown_after_job_finishes,
+            cluster_selector=cluster_selector if cluster_selector else None,
         )
