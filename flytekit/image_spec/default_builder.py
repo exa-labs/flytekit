@@ -187,7 +187,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/
         --no-confirm
 
 # Set PATH to include nix binaries (instead of sourcing nix-daemon.sh which may not exist in containers)
-ENV PATH="/nix/var/nix/profiles/default/bin:$PATH"
+ENV PATH="/nix/var/nix/profiles/default/bin:$$PATH"
 
 # Create a working directory for the build
 WORKDIR /build
