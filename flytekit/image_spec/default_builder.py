@@ -175,15 +175,19 @@ RUN apt-get update -y && \
 
 # Install Nix directly into the image layer (not cache mount) so it persists
 # This ensures nix is available on all builders (amd64 and arm64) regardless of cache state
+# Use --no-start-daemon since we're in a container without systemd
 RUN curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
-        --determinate \
-        --extra-conf "sandbox = true" \
+        --extra-conf "sandbox = false" \
         --extra-conf "max-substitution-jobs = 256" \
         --extra-conf "http-connections = 256" \
         --extra-conf "download-buffer-size = 1073741824" \
         --init none \
+        --no-start-daemon \
         --no-confirm
+
+# Set PATH to include nix binaries (instead of sourcing nix-daemon.sh which may not exist in containers)
+ENV PATH="/nix/var/nix/profiles/default/bin:$PATH"
 
 # Create a working directory for the build
 WORKDIR /build
@@ -191,10 +195,8 @@ WORKDIR /build
 # Build with cache mount - reuses the nix store cache across builds for faster builds
 # The nix installation itself is in the image layer, but the store cache speeds up subsequent builds
 RUN --mount=type=bind,source=.,target=/build/ \
-    --mount=type=cache,target=/nix/store,id=nix-store \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
-    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
     nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
     --image-parallel-copies 32 \
     --dest-creds "AWS:$ECR_TOKEN"
