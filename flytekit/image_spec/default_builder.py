@@ -173,9 +173,9 @@ RUN apt-get update -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Nix using cache mount so it persists across builds
-RUN --mount=type=cache,target=/nix,id=nix-determinate \
-    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+# Install Nix directly into the image layer (not cache mount) so it persists
+# This ensures nix is available on all builders (amd64 and arm64) regardless of cache state
+RUN curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
         --determinate \
         --extra-conf "sandbox = true" \
@@ -188,9 +188,10 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
 # Create a working directory for the build
 WORKDIR /build
 
-# Build with cache mount - reuses the same cache across builds
+# Build with cache mount - reuses the nix store cache across builds for faster builds
+# The nix installation itself is in the image layer, but the store cache speeds up subsequent builds
 RUN --mount=type=bind,source=.,target=/build/ \
-    --mount=type=cache,target=/nix,id=nix-determinate \
+    --mount=type=cache,target=/nix/store,id=nix-store \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
