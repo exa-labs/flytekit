@@ -189,11 +189,12 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
 WORKDIR /build
 
 # Build with cache mount - reuses the same cache across builds
+# Source nix profile from multiple possible locations for compatibility with different nix installations
 RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
-    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+    for f in /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh /nix/var/nix/profiles/default/etc/profile.d/nix.sh /etc/profile.d/nix.sh /root/.nix-profile/etc/profile.d/nix.sh; do [ -f "$$f" ] && . "$$f" && break; done && \
     nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
     --image-parallel-copies 32 \
     --dest-creds "AWS:$ECR_TOKEN"
