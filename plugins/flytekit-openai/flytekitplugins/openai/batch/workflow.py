@@ -1,7 +1,6 @@
 from typing import Any, Dict, Iterator, Optional
 
 from flytekit import Resources, Workflow
-from flytekit.models.security import Secret
 from flytekit.types.file import JSONLFile
 from flytekit.types.iterator import JSON
 
@@ -16,7 +15,8 @@ from .task import (
 
 def create_batch(
     name: str,
-    secret: Secret,
+    secret_group: str,
+    secret_key: str,
     openai_organization: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     is_json_iterator: bool = True,
@@ -27,8 +27,9 @@ def create_batch(
     Uploads JSON data to a JSONL file, creates a batch, waits for it to complete, and downloads the output/error JSON files.
 
     :param name: The suffix to be added to workflow and task names.
+    :param secret_group: The secret group containing the OpenAI API key.
+    :param secret_key: The secret key for the OpenAI API key within the group.
     :param openai_organization: Name of the OpenAI organization.
-    :param secret: Secret comprising the OpenAI API key.
     :param config: Additional config for batch creation.
     :param is_json_iterator: Set to True if you're sending an iterator/generator; if a JSONL file, set to False.
     :param file_upload_mem: Memory to allocate to the upload file task.
@@ -43,18 +44,28 @@ def create_batch(
 
     upload_jsonl_file_task_obj = UploadJSONLFileTask(
         name=f"openai-file-upload-{name.replace('.', '')}",
-        task_config=OpenAIFileConfig(openai_organization=openai_organization, secret=secret),
+        task_config=OpenAIFileConfig(
+            secret_group=secret_group,
+            secret_key=secret_key,
+            openai_organization=openai_organization,
+        ),
     )
     if config is None:
         config = {}
     batch_endpoint_task_obj = BatchEndpointTask(
         name=f"openai-batch-{name.replace('.', '')}",
-        openai_organization=openai_organization,
         config=config,
+        secret_group=secret_group,
+        secret_key=secret_key,
+        openai_organization=openai_organization,
     )
     download_json_files_task_obj = DownloadJSONFilesTask(
         name=f"openai-download-files-{name.replace('.', '')}",
-        task_config=OpenAIFileConfig(openai_organization=openai_organization, secret=secret),
+        task_config=OpenAIFileConfig(
+            secret_group=secret_group,
+            secret_key=secret_key,
+            openai_organization=openai_organization,
+        ),
     )
 
     node_1 = wf.add_entity(

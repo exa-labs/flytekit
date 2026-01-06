@@ -33,6 +33,8 @@ class BatchEndpointTask(AsyncAgentExecutorMixin, PythonTask):
         self,
         name: str,
         config: Dict[str, Any],
+        secret_group: str,
+        secret_key: str,
         openai_organization: Optional[str] = None,
         **kwargs,
     ):
@@ -43,16 +45,21 @@ class BatchEndpointTask(AsyncAgentExecutorMixin, PythonTask):
                 inputs=kwtypes(input_file_id=str),
                 outputs=kwtypes(result=Dict),
             ),
+            secret_requests=[Secret(group=secret_group, key=secret_key)],
             **kwargs,
         )
 
         self._openai_organization = openai_organization
         self._config = config
+        self._secret_group = secret_group
+        self._secret_key = secret_key
 
     def get_custom(self, settings: SerializationSettings) -> Dict[str, Any]:
         return {
             "openai_organization": self._openai_organization,
             "config": self._config,
+            "secret_group": self._secret_group,
+            "secret_key": self._secret_key,
         }
 
 
@@ -69,16 +76,18 @@ class OpenAIFileDefaultImages(DefaultImages):
 
 @dataclass
 class OpenAIFileConfig:
-    secret: Secret
+    secret_group: str
+    secret_key: str
     openai_organization: Optional[str] = None
 
     def _secret_to_dict(self) -> Dict[str, Optional[str]]:
         return {
-            "group": self.secret.group,
-            "key": self.secret.key,
-            "group_version": self.secret.group_version,
-            "mount_requirement": self.secret.mount_requirement.value,
+            "group": self.secret_group,
+            "key": self.secret_key,
         }
+
+    def get_secret(self) -> Secret:
+        return Secret(group=self.secret_group, key=self.secret_key)
 
 
 class UploadJSONLFileTask(PythonCustomizedContainerTask[OpenAIFileConfig]):
@@ -104,7 +113,7 @@ class UploadJSONLFileTask(PythonCustomizedContainerTask[OpenAIFileConfig]):
                 ),
                 outputs=kwtypes(result=str),
             ),
-            secret_requests=[task_config.secret],
+            secret_requests=[task_config.get_secret()],
             **kwargs,
         )
 
@@ -123,7 +132,6 @@ class UploadJSONLFileExecutor(ShimTaskExecutor[UploadJSONLFileTask]):
             api_key=flytekit.current_context().secrets.get(
                 group=secret["group"],
                 key=secret["key"],
-                group_version=secret["group_version"],
             ),
         )
 
@@ -153,7 +161,7 @@ class DownloadJSONFilesTask(PythonCustomizedContainerTask[OpenAIFileConfig]):
                 inputs=kwtypes(batch_endpoint_result=Dict),
                 outputs=kwtypes(result=BatchResult),
             ),
-            secret_requests=[task_config.secret],
+            secret_requests=[task_config.get_secret()],
             **kwargs,
         )
 
@@ -172,7 +180,6 @@ class DownloadJSONFilesExecutor(ShimTaskExecutor[DownloadJSONFilesTask]):
             api_key=flytekit.current_context().secrets.get(
                 group=secret["group"],
                 key=secret["key"],
-                group_version=secret["group_version"],
             ),
         )
 
