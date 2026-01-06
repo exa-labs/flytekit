@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from mashumaro.mixins.json import DataClassJSONMixin
 
@@ -26,6 +26,9 @@ class BatchResult(DataClassJSONMixin):
     error_file: Optional[JSONLFile] = None
 
 
+OPENAI_API_KEY = "FLYTE_OPENAI_API_KEY"
+
+
 class BatchEndpointTask(AsyncAgentExecutorMixin, PythonTask):
     _TASK_TYPE = "openai-batch"
 
@@ -33,11 +36,19 @@ class BatchEndpointTask(AsyncAgentExecutorMixin, PythonTask):
         self,
         name: str,
         config: Dict[str, Any],
-        secret_group: str,
-        secret_key: str,
         openai_organization: Optional[str] = None,
+        secret: Optional[Secret] = None,
+        secret_group: Optional[str] = None,
+        secret_key: Optional[str] = None,
         **kwargs,
     ):
+        if secret is not None:
+            secret_group = secret.group
+            secret_key = secret.key
+        elif secret_group is None or secret_key is None:
+            secret_group = None
+            secret_key = OPENAI_API_KEY
+
         super().__init__(
             name=name,
             task_type=self._TASK_TYPE,
@@ -76,9 +87,18 @@ class OpenAIFileDefaultImages(DefaultImages):
 
 @dataclass
 class OpenAIFileConfig:
-    secret_group: str
-    secret_key: str
+    secret: Optional[Secret] = None
     openai_organization: Optional[str] = None
+    secret_group: Optional[str] = None
+    secret_key: Optional[str] = None
+
+    def __post_init__(self):
+        if self.secret is not None:
+            self.secret_group = self.secret.group
+            self.secret_key = self.secret.key
+        elif self.secret_group is None or self.secret_key is None:
+            self.secret_group = None
+            self.secret_key = OPENAI_API_KEY
 
     def _secret_to_dict(self) -> Dict[str, Optional[str]]:
         return {
