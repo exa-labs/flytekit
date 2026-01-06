@@ -13,10 +13,14 @@ from flytekit.core.interface import Interface
 from flytekit.core.python_customized_container_task import PythonCustomizedContainerTask
 from flytekit.core.shim_task import ShimTaskExecutor
 from flytekit.extend.backend.base_agent import AsyncAgentExecutorMixin
+from flytekit.models.security import Secret
 from flytekit.models.task import TaskTemplate
 from flytekit.types.file import JSONLFile
 
 openai = lazy_module("openai")
+
+OPENAI_SECRET_GROUP = None
+OPENAI_SECRET_KEY = "FLYTE_OPENAI_API_KEY"
 
 
 @dataclass
@@ -42,6 +46,7 @@ class BatchEndpointTask(AsyncAgentExecutorMixin, PythonTask):
                 inputs=kwtypes(input_file_id=str, openai_api_key=str),
                 outputs=kwtypes(result=Dict),
             ),
+            secret_requests=[Secret(group=OPENAI_SECRET_GROUP, key=OPENAI_SECRET_KEY)],
             **kwargs,
         )
 
@@ -95,6 +100,7 @@ class UploadJSONLFileTask(PythonCustomizedContainerTask[OpenAIFileConfig]):
                 ),
                 outputs=kwtypes(result=str),
             ),
+            secret_requests=[Secret(group=OPENAI_SECRET_GROUP, key=OPENAI_SECRET_KEY)],
             **kwargs,
         )
 
@@ -106,9 +112,16 @@ class UploadJSONLFileTask(PythonCustomizedContainerTask[OpenAIFileConfig]):
 
 class UploadJSONLFileExecutor(ShimTaskExecutor[UploadJSONLFileTask]):
     def execute_from_model(self, tt: TaskTemplate, **kwargs) -> Any:
+        openai_api_key = kwargs.get("openai_api_key", "")
+        if not openai_api_key:
+            openai_api_key = flytekit.current_context().secrets.get(
+                group=OPENAI_SECRET_GROUP,
+                key=OPENAI_SECRET_KEY,
+            )
+
         client = openai.OpenAI(
             organization=tt.custom["openai_organization"],
-            api_key=kwargs["openai_api_key"],
+            api_key=openai_api_key,
         )
 
         local_jsonl_file = kwargs["jsonl_in"].download()
@@ -137,6 +150,7 @@ class DownloadJSONFilesTask(PythonCustomizedContainerTask[OpenAIFileConfig]):
                 inputs=kwtypes(batch_endpoint_result=Dict, openai_api_key=str),
                 outputs=kwtypes(result=BatchResult),
             ),
+            secret_requests=[Secret(group=OPENAI_SECRET_GROUP, key=OPENAI_SECRET_KEY)],
             **kwargs,
         )
 
@@ -148,9 +162,16 @@ class DownloadJSONFilesTask(PythonCustomizedContainerTask[OpenAIFileConfig]):
 
 class DownloadJSONFilesExecutor(ShimTaskExecutor[DownloadJSONFilesTask]):
     def execute_from_model(self, tt: TaskTemplate, **kwargs) -> Any:
+        openai_api_key = kwargs.get("openai_api_key", "")
+        if not openai_api_key:
+            openai_api_key = flytekit.current_context().secrets.get(
+                group=OPENAI_SECRET_GROUP,
+                key=OPENAI_SECRET_KEY,
+            )
+
         client = openai.OpenAI(
             organization=tt.custom["openai_organization"],
-            api_key=kwargs["openai_api_key"],
+            api_key=openai_api_key,
         )
 
         batch_result = BatchResult()

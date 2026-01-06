@@ -12,11 +12,13 @@ from flytekit.extend.backend.base_agent import (
     Resource,
     ResourceMeta,
 )
-from flytekit.extend.backend.utils import convert_to_flyte_phase
+from flytekit.extend.backend.utils import convert_to_flyte_phase, get_agent_secret
 from flytekit.models.literals import LiteralMap
 from flytekit.models.task import TaskTemplate
 
 openai = lazy_module("openai")
+
+OPENAI_SECRET_KEY = "FLYTE_OPENAI_API_KEY"
 
 
 class State(Enum):
@@ -35,7 +37,7 @@ class State(Enum):
 class BatchEndpointMetadata(ResourceMeta):
     openai_org: str
     batch_id: str
-    openai_api_key: str
+    openai_api_key: Optional[str] = None
 
     def encode(self) -> bytes:
         return cloudpickle.dumps(self)
@@ -64,11 +66,16 @@ class BatchEndpointAgent(AsyncAgentBase):
             {"input_file_id": str, "openai_api_key": str},
         )
         custom = task_template.custom
-        openai_api_key = input_values["openai_api_key"]
+        openai_api_key = input_values.get("openai_api_key", "")
+
+        if openai_api_key:
+            api_key_for_client = openai_api_key
+        else:
+            api_key_for_client = get_agent_secret(secret_key=OPENAI_SECRET_KEY)
 
         async_client = openai.AsyncOpenAI(
             organization=custom.get("openai_organization"),
-            api_key=openai_api_key,
+            api_key=api_key_for_client,
         )
 
         custom["config"].setdefault("completion_window", "24h")
@@ -83,7 +90,7 @@ class BatchEndpointAgent(AsyncAgentBase):
         return BatchEndpointMetadata(
             batch_id=batch_id,
             openai_org=custom["openai_organization"],
-            openai_api_key=openai_api_key,
+            openai_api_key=openai_api_key if openai_api_key else None,
         )
 
     async def get(
@@ -91,9 +98,14 @@ class BatchEndpointAgent(AsyncAgentBase):
         resource_meta: BatchEndpointMetadata,
         **kwargs,
     ) -> Resource:
+        if resource_meta.openai_api_key:
+            api_key = resource_meta.openai_api_key
+        else:
+            api_key = get_agent_secret(secret_key=OPENAI_SECRET_KEY)
+
         async_client = openai.AsyncOpenAI(
             organization=resource_meta.openai_org,
-            api_key=resource_meta.openai_api_key,
+            api_key=api_key,
         )
 
         retrieved_result = await async_client.batches.retrieve(resource_meta.batch_id)
@@ -119,9 +131,14 @@ class BatchEndpointAgent(AsyncAgentBase):
         resource_meta: BatchEndpointMetadata,
         **kwargs,
     ):
+        if resource_meta.openai_api_key:
+            api_key = resource_meta.openai_api_key
+        else:
+            api_key = get_agent_secret(secret_key=OPENAI_SECRET_KEY)
+
         async_client = openai.AsyncOpenAI(
             organization=resource_meta.openai_org,
-            api_key=resource_meta.openai_api_key,
+            api_key=api_key,
         )
 
         await async_client.batches.cancel(resource_meta.batch_id)
