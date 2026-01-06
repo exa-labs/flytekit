@@ -1,7 +1,6 @@
 from typing import Any, Dict, Iterator, Optional
 
 from flytekit import Resources, Workflow
-from flytekit.models.security import Secret
 from flytekit.types.file import JSONLFile
 from flytekit.types.iterator import JSON
 
@@ -16,7 +15,6 @@ from .task import (
 
 def create_batch(
     name: str,
-    secret: Secret,
     openai_organization: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     is_json_iterator: bool = True,
@@ -28,7 +26,6 @@ def create_batch(
 
     :param name: The suffix to be added to workflow and task names.
     :param openai_organization: Name of the OpenAI organization.
-    :param secret: Secret comprising the OpenAI API key.
     :param config: Additional config for batch creation.
     :param is_json_iterator: Set to True if you're sending an iterator/generator; if a JSONL file, set to False.
     :param file_upload_mem: Memory to allocate to the upload file task.
@@ -41,9 +38,11 @@ def create_batch(
     else:
         wf.add_workflow_input("jsonl_in", JSONLFile)
 
+    wf.add_workflow_input("openai_api_key", str)
+
     upload_jsonl_file_task_obj = UploadJSONLFileTask(
         name=f"openai-file-upload-{name.replace('.', '')}",
-        task_config=OpenAIFileConfig(openai_organization=openai_organization, secret=secret),
+        task_config=OpenAIFileConfig(openai_organization=openai_organization),
     )
     if config is None:
         config = {}
@@ -54,20 +53,23 @@ def create_batch(
     )
     download_json_files_task_obj = DownloadJSONFilesTask(
         name=f"openai-download-files-{name.replace('.', '')}",
-        task_config=OpenAIFileConfig(openai_organization=openai_organization, secret=secret),
+        task_config=OpenAIFileConfig(openai_organization=openai_organization),
     )
 
     node_1 = wf.add_entity(
         upload_jsonl_file_task_obj,
         jsonl_in=wf.inputs["jsonl_in"],
+        openai_api_key=wf.inputs["openai_api_key"],
     )
     node_2 = wf.add_entity(
         batch_endpoint_task_obj,
         input_file_id=node_1.outputs["result"],
+        openai_api_key=wf.inputs["openai_api_key"],
     )
     node_3 = wf.add_entity(
         download_json_files_task_obj,
         batch_endpoint_result=node_2.outputs["result"],
+        openai_api_key=wf.inputs["openai_api_key"],
     )
 
     node_1.with_overrides(requests=Resources(mem=file_upload_mem), limits=Resources(mem=file_upload_mem))
