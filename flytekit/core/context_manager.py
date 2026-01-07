@@ -379,6 +379,9 @@ class SecretsManager(object):
         """
         return self._GroupSecrets(item, self)
 
+    # API keys that should check raw env var during local execution with deprecation warning
+    _LLM_API_KEY_NAMES = {"OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"}
+
     def get(
         self,
         group: Optional[str] = None,
@@ -387,9 +390,16 @@ class SecretsManager(object):
         encode_mode: str = "r",
     ) -> str:
         """
-        Retrieves a secret using the resolution order -> Env followed by file. If not found raises a ValueError
+        Retrieves a secret using the resolution order -> Env followed by file. If not found raises a ValueError.
+
+        During local execution, for OpenAI, Gemini, and Anthropic API keys, this method also checks
+        the raw key name as an environment variable (e.g., OPENAI_API_KEY) before falling back to
+        the standard GROUP_KEY format. This allows users to use their local environment API keys
+        without configuring Flyte secrets.
+
         param encode_mode, defines the mode to open files, it can either be "r" to read file, or "rb" to read binary file
         """
+        import warnings
 
         from flytekit.configuration.plugin import get_plugin
 
@@ -400,7 +410,8 @@ class SecretsManager(object):
 
         # During local execution check for the key without a prefix
         ctx = FlyteContextManager.current_context()
-        if ctx.execution_state is None or ctx.execution_state.is_local_execution():
+        is_local = ctx.execution_state is None or ctx.execution_state.is_local_execution()
+        if is_local:
             env_prefixes.append("")
 
         for env_prefix in env_prefixes:
@@ -410,6 +421,20 @@ class SecretsManager(object):
             v = os.environ.get(env_var)
             if v is not None:
                 return v.strip()
+
+        # During local execution, also check the raw key as an env var for LLM API keys
+        if is_local and key and key.upper() in self._LLM_API_KEY_NAMES:
+            raw_key_value = os.environ.get(key.upper())
+            if raw_key_value is not None:
+                warnings.warn(
+                    f"Using {key.upper()} from local environment. "
+                    f"This fallback behavior is deprecated. "
+                    f"Please store your API keys as environment variables going forward, "
+                    f"as Flyte secret-based API key retrieval will be removed in a future release.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                return raw_key_value.strip()
 
         fpath = self.get_secrets_file(group, key, group_version)
         if os.path.exists(fpath):
@@ -447,61 +472,6 @@ class SecretsManager(object):
         l = [k.lower() for k in filter(None, (group, group_version, key))]
         l[-1] = f"{self._file_prefix}{l[-1]}"
         return os.path.join(self._base_dir, *l)
-
-    def get_from_secret(
-        self,
-        secret: "Secret",
-        encode_mode: str = "r",
-        check_env_var_first: bool = True,
-    ) -> str:
-        """
-        Retrieves a secret value from a Secret object.
-
-        This method provides a convenient way to retrieve secrets using a Secret object directly.
-        When check_env_var_first is True (default), it first checks if the secret's env_var
-        (or key if env_var is not set) exists as an environment variable. If found, it returns
-        that value. Otherwise, it falls back to the standard Flyte secret resolution.
-
-        This is useful for scenarios where you want to allow local environment variables to
-        override Flyte-managed secrets, such as during local development or testing.
-
-        Args:
-            secret: The Secret object containing group, key, and optional env_var.
-            encode_mode: The mode to open files, either "r" for text or "rb" for binary.
-            check_env_var_first: If True, check the secret's env_var (or key) as a direct
-                environment variable before falling back to Flyte secret resolution.
-                Defaults to True.
-
-        Returns:
-            The secret value as a string.
-
-        Raises:
-            ValueError: If the secret has no key set or if the secret cannot be found.
-
-        Example:
-            >>> from flytekit import Secret, current_context
-            >>> secret = Secret(group="my-group", key="MY_API_KEY", env_var="MY_API_KEY")
-            >>> # If MY_API_KEY is set in the environment, it will be used
-            >>> # Otherwise, falls back to Flyte secret resolution
-            >>> value = current_context().secrets.get_from_secret(secret)
-        """
-        if secret.key is None:
-            raise ValueError(f"Secret {secret.group} must have a key set")
-
-        # Check direct environment variable first if requested
-        if check_env_var_first:
-            env_var_name = secret.env_var if secret.env_var else secret.key
-            local_env_value = os.environ.get(env_var_name)
-            if local_env_value is not None:
-                return local_env_value.strip()
-
-        # Fall back to standard Flyte secret resolution
-        return self.get(
-            group=secret.group,
-            key=secret.key,
-            group_version=secret.group_version,
-            encode_mode=encode_mode,
-        )
 
 
 @dataclass(frozen=True)
