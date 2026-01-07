@@ -379,7 +379,7 @@ class SecretsManager(object):
         """
         return self._GroupSecrets(item, self)
 
-    # API keys that should check raw env var during local execution with deprecation warning
+    # API keys that should check raw env var with deprecation warning
     _LLM_API_KEY_NAMES = {"OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"}
 
     def get(
@@ -392,10 +392,10 @@ class SecretsManager(object):
         """
         Retrieves a secret using the resolution order -> Env followed by file. If not found raises a ValueError.
 
-        During local execution, for OpenAI, Gemini, and Anthropic API keys, this method also checks
-        the raw key name as an environment variable (e.g., OPENAI_API_KEY) before falling back to
-        the standard GROUP_KEY format. This allows users to use their local environment API keys
-        without configuring Flyte secrets.
+        For OpenAI, Gemini, and Anthropic API keys, this method also checks the raw key name as an
+        environment variable (e.g., OPENAI_API_KEY) before falling back to the standard GROUP_KEY
+        format. This allows users to pass their local environment API keys to Flyte containers via
+        --envvars without configuring Flyte secrets.
 
         param encode_mode, defines the mode to open files, it can either be "r" to read file, or "rb" to read binary file
         """
@@ -422,15 +422,14 @@ class SecretsManager(object):
             if v is not None:
                 return v.strip()
 
-        # During local execution, also check the raw key as an env var for LLM API keys
-        if is_local and key and key.upper() in self._LLM_API_KEY_NAMES:
+        # Also check the raw key as an env var for LLM API keys (works in both local and remote)
+        if key and key.upper() in self._LLM_API_KEY_NAMES:
             raw_key_value = os.environ.get(key.upper())
             if raw_key_value is not None:
                 warnings.warn(
-                    f"Using {key.upper()} from local environment. "
+                    f"Using {key.upper()} from environment variable. "
                     f"This fallback behavior is deprecated. "
-                    f"Please store your API keys as environment variables going forward, "
-                    f"as Flyte secret-based API key retrieval will be removed in a future release.",
+                    f"Please configure Flyte secrets instead of passing API keys via environment variables.",
                     DeprecationWarning,
                     stacklevel=2,
                 )
