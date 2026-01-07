@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional
@@ -71,6 +72,53 @@ class Secret(_common.FlyteIdlEntity):
             key=pb2_object.key if pb2_object.key else None,
             mount_requirement=Secret.MountType(pb2_object.mount_requirement),
             env_var=pb2_object.env_var if pb2_object.env_var else None,
+        )
+
+    def get_value(self, check_env_var_first: bool = True) -> str:
+        """
+        Retrieves the secret value, optionally checking environment variables first.
+
+        When check_env_var_first is True (default), this method first checks if the
+        secret's env_var (or key if env_var is not set) exists as an environment
+        variable. If found, it returns that value. Otherwise, it falls back to
+        standard Flyte secret resolution via the SecretsManager.
+
+        This is useful for local development where you want to use API keys from
+        your local environment (e.g., OPENAI_API_KEY) without configuring Flyte secrets.
+
+        Args:
+            check_env_var_first: If True, check the secret's env_var (or key) as a
+                direct environment variable before falling back to Flyte secret
+                resolution. Defaults to True.
+
+        Returns:
+            The secret value as a string.
+
+        Raises:
+            ValueError: If the secret has no key set or if the secret cannot be found.
+
+        Example:
+            >>> secret = Secret(group="llm-api-keys", key="OPENAI_API_KEY", env_var="OPENAI_API_KEY")
+            >>> # If OPENAI_API_KEY is set in the environment, it will be used
+            >>> # Otherwise, falls back to Flyte secret resolution
+            >>> value = secret.get_value()
+        """
+        if self.key is None:
+            raise ValueError(f"Secret {self.group} must have a key set")
+
+        if check_env_var_first:
+            env_var_name = self.env_var if self.env_var else self.key
+            local_env_value = os.environ.get(env_var_name)
+            if local_env_value is not None:
+                return local_env_value.strip()
+
+        from flytekit.core.context_manager import FlyteContextManager
+
+        secrets_manager = FlyteContextManager.current_context().user_space_params.secrets
+        return secrets_manager.get(
+            group=self.group,
+            key=self.key,
+            group_version=self.group_version,
         )
 
 
