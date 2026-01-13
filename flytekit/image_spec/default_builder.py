@@ -189,11 +189,20 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
 WORKDIR /build
 
 # Build with cache mount - reuses the same cache across builds
+# Add all possible nix bin locations to PATH for compatibility with different nix installations
+# If nix is still not found (cache eviction), reinstall it in this step
 RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
-    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+    export PATH="/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/per-user/root/profile/bin:$$PATH" && \
+    for f in /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh /nix/var/nix/profiles/default/etc/profile.d/nix.sh /etc/profile.d/nix.sh /root/.nix-profile/etc/profile.d/nix.sh; do [ -f "$$f" ] && . "$$f" && break; done; \
+    if ! command -v nix >/dev/null 2>&1; then \
+        echo "Nix not found in cache, reinstalling..." && \
+        curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --determinate --extra-conf "sandbox = true" --extra-conf "max-substitution-jobs = 256" --extra-conf "http-connections = 256" --extra-conf "download-buffer-size = 1073741824" --init none --no-confirm && \
+        export PATH="/nix/var/nix/profiles/default/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/per-user/root/profile/bin:$$PATH"; \
+    fi && \
+    command -v nix >/dev/null 2>&1 || { echo "ERROR: nix command not found after install"; ls -la /nix/var/nix/profiles/ /root/.nix-profile/ 2>/dev/null || true; exit 1; } && \
     nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
     --image-parallel-copies 32 \
     --dest-creds "AWS:$ECR_TOKEN"
