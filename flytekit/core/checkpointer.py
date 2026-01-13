@@ -92,6 +92,7 @@ class SyncCheckpoint(Checkpoint):
     def restore(self, path: typing.Optional[typing.Union[Path, str]] = None) -> typing.Optional[Path]:
         # We have to lazy load, until we fix the imports
         from flytekit.core.context_manager import FlyteContextManager
+        from flytekit.exceptions.user import FlyteDataNotFoundException
 
         if self._checkpoint_src is None or self._checkpoint_src == "":
             return None
@@ -109,7 +110,10 @@ class SyncCheckpoint(Checkpoint):
         if not path.is_dir():
             raise ValueError("Checkpoints can be restored to a directory only.")
 
-        FlyteContextManager.current_context().file_access.download_directory(self._checkpoint_src, str(path))
+        try:
+            FlyteContextManager.current_context().file_access.download_directory(self._checkpoint_src, str(path))
+        except FlyteDataNotFoundException:
+            return None
         self._prev_download_path = path
         return self._prev_download_path
 
