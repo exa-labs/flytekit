@@ -415,6 +415,10 @@ class PlatformConfig(object):
     :param auth_mode: The OAuth mode to use. Defaults to pkce flow
     :param ca_cert_file_path: [optional] str Root Cert to be loaded and used to verify admin
     :param http_proxy_url: [optional] HTTP Proxy to be used for OAuth requests
+    :param token_endpoint_override: [optional] Override the OAuth2 token endpoint URL. Useful when running
+      in-cluster where the server-provided token endpoint (external URL) may not be reachable due to
+      network restrictions like hairpin NAT. Set this to an internal HTTP endpoint like
+      "http://flyte-binary-http.flyte.svc.cluster.local:8088/oauth2/token"
     """
 
     endpoint: str = "localhost:30080"
@@ -431,6 +435,7 @@ class PlatformConfig(object):
     audience: typing.Optional[str] = None
     rpc_retries: int = 3
     http_proxy_url: typing.Optional[str] = None
+    token_endpoint_override: typing.Optional[str] = None
 
     @classmethod
     def auto(cls, config_file: typing.Optional[typing.Union[str, ConfigFile]] = None) -> PlatformConfig:

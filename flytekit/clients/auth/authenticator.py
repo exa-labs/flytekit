@@ -208,11 +208,12 @@ class ClientCredentialsAuthenticator(Authenticator):
         verify: typing.Optional[typing.Union[bool, str]] = None,
         audience: typing.Optional[str] = None,
         session: typing.Optional[requests.Session] = None,
+        token_endpoint_override: typing.Optional[str] = None,
     ):
         if not client_id or not client_secret:
             raise ValueError("Client ID and Client SECRET both are required.")
         cfg = cfg_store.get_client_config()
-        self._token_endpoint = cfg.token_endpoint
+        self._token_endpoint = token_endpoint_override or cfg.token_endpoint
         # Use scopes from `flytekit.configuration.PlatformConfig` if passed
         self._scopes = scopes or cfg.scopes
         self._client_id = client_id
