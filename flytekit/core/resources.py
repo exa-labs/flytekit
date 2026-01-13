@@ -155,8 +155,9 @@ def pod_spec_from_resources(
 
     if node_selector:
         cluster_name = node_selector.get("cluster", None)
-        instance_type = node_selector.get("instance_type", None)
-        capacity_type = node_selector.get("capacity_type", None)
+        # Support both old and new (Karpenter-compatible) node selector keys
+        instance_type = node_selector.get("instance_type") or node_selector.get("node.kubernetes.io/instance-type")
+        capacity_type = node_selector.get("capacity_type") or node_selector.get("karpenter.sh/capacity-type")
 
         if (cluster_name and cluster_name == "aws") or instance_type or capacity_type:
             # Note: We intentionally do NOT override dns_policy to "Default" here.
@@ -165,11 +166,6 @@ def pod_spec_from_resources(
             # worker hostnames). The default "ClusterFirst" policy ensures proper DNS resolution.
             tolerations.append(
                 V1Toleration(key="cloud", operator="Equal", value="aws", effect="NoSchedule"),
-            )
-
-        if capacity_type == "spot":
-            tolerations.append(
-                V1Toleration(key="spot", operator="Equal", value="true", effect="NoSchedule"),
             )
 
     pod_spec = V1PodSpec(
