@@ -90,6 +90,9 @@ def to_serializable_cases(
 
 def get_command_prefix_for_fast_execute(settings: SerializationSettings) -> List[str]:
     return [
+        "python",
+        "-m",
+        "flytekit.bin.entrypoint",
         "pyflyte-fast-execute",
         "--additional-distribution",
         settings.fast_serialization_settings.distribution_location

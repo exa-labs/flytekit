@@ -159,6 +159,9 @@ def test_fast_serialization(serialization_settings):
     task_spec = get_serializable(OrderedDict(), serialization_settings, arraynode_maptask)
 
     assert task_spec.template.container.args == [
+        "python",
+        "-m",
+        "flytekit.bin.entrypoint",
         "pyflyte-fast-execute",
         "--additional-distribution",
         "{{ .remote_package_path }}",

@@ -394,6 +394,9 @@ def test_render_task_template():
     template = get_task_template("dummy")
     tt = render_task_template(template, "s3://becket")
     assert tt.container.args == [
+        "python",
+        "-m",
+        "flytekit.bin.entrypoint",
         "pyflyte-fast-execute",
         "--additional-distribution",
         "{{ .remote_package_path }}",
