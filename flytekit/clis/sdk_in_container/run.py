@@ -11,6 +11,7 @@ import tempfile
 import typing
 import typing as t
 from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from typing import Iterator, get_args
 
 import rich_click as click
@@ -523,10 +524,20 @@ def to_click_option(
     )
 
 
-def options_from_run_params(run_level_params: RunLevelParams) -> Options:
+def options_from_run_params(
+    run_level_params: RunLevelParams,
+    cli_invocation_time: typing.Optional[datetime] = None,
+    build_finish_time: typing.Optional[datetime] = None,
+) -> Options:
+    annotations_dict = dict(run_level_params.annotations) if run_level_params.annotations else {}
+    if cli_invocation_time:
+        annotations_dict["flytekit.io/cli-invocation-time"] = cli_invocation_time.isoformat()
+    if build_finish_time:
+        annotations_dict["flytekit.io/build-finish-time"] = build_finish_time.isoformat()
+
     return Options(
         labels=Labels(run_level_params.labels) if run_level_params.labels else None,
-        annotations=Annotations(run_level_params.annotations) if run_level_params.annotations else None,
+        annotations=Annotations(annotations_dict) if annotations_dict else None,
         raw_output_data_config=RawOutputDataConfig(output_location_prefix=run_level_params.raw_output_data_prefix)
         if run_level_params.raw_output_data_prefix
         else None,
@@ -549,6 +560,8 @@ def run_remote(
     inputs: typing.Dict[str, typing.Any],
     run_level_params: RunLevelParams,
     type_hints: typing.Optional[typing.Dict[str, typing.Type]] = None,
+    cli_invocation_time: typing.Optional[datetime] = None,
+    build_finish_time: typing.Optional[datetime] = None,
 ):
     """
     Helper method that executes the given remote FlyteLaunchplan, FlyteWorkflow or FlyteTask
@@ -568,7 +581,7 @@ def run_remote(
             project=project,
             domain=domain,
             execution_name=run_level_params.name,
-            options=options_from_run_params(run_level_params),
+            options=options_from_run_params(run_level_params, cli_invocation_time, build_finish_time),
             type_hints=type_hints,
             overwrite_cache=run_level_params.overwrite_cache,
             envs=run_level_params.envvars,
@@ -801,6 +814,7 @@ def run_command(ctx: click.Context, entity: typing.Union[PythonFunctionWorkflow,
         Click command function that is used to execute a flyte workflow from the given entity in the file.
         """
         # By the time we get to this function, all the loading has already happened
+        cli_invocation_time = datetime.now(timezone.utc)
 
         run_level_params: RunLevelParams = ctx.obj
         entity_type = "workflow"
@@ -932,6 +946,8 @@ def run_command(ctx: click.Context, entity: typing.Union[PythonFunctionWorkflow,
                         fast_package_options=fast_package_options,
                     )
 
+                build_finish_time = datetime.now(timezone.utc)
+
                 run_remote(
                     remote,
                     remote_entity,
@@ -940,6 +956,8 @@ def run_command(ctx: click.Context, entity: typing.Union[PythonFunctionWorkflow,
                     inputs,
                     run_level_params,
                     type_hints=entity.python_interface.inputs,
+                    cli_invocation_time=cli_invocation_time,
+                    build_finish_time=build_finish_time,
                 )
         finally:
             if run_level_params.computed_params.temp_file_name:
