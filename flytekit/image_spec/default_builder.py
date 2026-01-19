@@ -891,6 +891,8 @@ class DefaultImageBuilder(ImageSpecBuilder):
                     "--platform",
                     image_spec.platform,
                 ]
+                if image_spec.nix:
+                    command.extend(["--project", "bf5bv9t2mj"])
             else:
                 command = [
                     "docker",
