@@ -181,11 +181,14 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Nix using cache mount so it persists across builds
+# Use --init none since we're in a container and don't need systemd
+# Configure build-users-group to empty string to run without nixbld group
 RUN --mount=type=cache,target=/nix,id=nix-determinate \
     curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
         --determinate \
-        --extra-conf "sandbox = true" \
+        --extra-conf "sandbox = false" \
+        --extra-conf "build-users-group = " \
         --extra-conf "max-substitution-jobs = 256" \
         --extra-conf "http-connections = 256" \
         --extra-conf "download-buffer-size = 1073741824" \
@@ -197,6 +200,7 @@ WORKDIR /build
 
 # Build with cache mount - reuses the same cache across builds
 # Note: We use shell form (not exec form) so that ARG variables are expanded
+# Source nix profile and run nix directly (no daemon needed with build-users-group = "")
 RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
