@@ -105,6 +105,52 @@ def _compute_path_digest(path: pathlib.Path) -> str:
     return hashlib.sha1(path.read_bytes().strip()).hexdigest()
 
 
+def check_ecr_image_architectures(registry: str, repository: str, tag: str) -> Optional[List[str]]:
+    """
+    Check what architectures an ECR image supports using docker buildx imagetools.
+
+    Args:
+        registry: ECR registry URL (e.g., "123456789012.dkr.ecr.us-east-1.amazonaws.com")
+        repository: Repository name (e.g., "my-app")
+        tag: Image tag
+
+    Returns:
+        List of architectures (e.g., ["amd64", "arm64"]) if image exists, empty list if not found, None if check failed
+    """
+    import subprocess
+
+    full_image = f"{registry}/{repository}:{tag}"
+    try:
+        result = subprocess.run(
+            ["docker", "buildx", "imagetools", "inspect", full_image],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            if "not found" in result.stderr.lower() or "manifest unknown" in result.stderr.lower():
+                return []
+            return None
+
+        # Parse the output to find architectures
+        # Output format includes lines like: "Platform: linux/amd64" or "linux/arm64"
+        architectures = []
+        for line in result.stdout.split("\n"):
+            if "linux/amd64" in line:
+                if "amd64" not in architectures:
+                    architectures.append("amd64")
+            if "linux/arm64" in line:
+                if "arm64" not in architectures:
+                    architectures.append("arm64")
+        return architectures
+    except subprocess.TimeoutExpired:
+        click.secho("Architecture check timed out", fg="yellow")
+        return None
+    except Exception as e:
+        click.secho(f"Failed to check image architectures: {e}", fg="yellow")
+        return None
+
+
 def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional[bool]:
     """
     Check if an image exists in ECR using AWS CLI.
@@ -505,7 +551,20 @@ class ImageSpec:
         Check if the image exists in the registry.
         Return True if the image exists in the registry, False otherwise.
         Return None if failed to check if the image exists due to the permission issue or other reasons.
+
+        For multi-arch images (platform contains multiple architectures like "linux/amd64,linux/arm64"),
+        this method verifies that the image is a proper multi-arch manifest with ALL required architectures.
+        If the image exists but is missing some architectures, it returns False to trigger a rebuild.
         """
+        # Check if this is a multi-arch image
+        platforms = [p.strip() for p in self.platform.split(",")] if self.platform else []
+        is_multi_arch = len(platforms) > 1
+        required_archs = set()
+        if is_multi_arch:
+            for platform in platforms:
+                arch = platform.split("/")[-1]  # Extract arch from "linux/amd64" -> "amd64"
+                required_archs.add(arch)
+
         # Check if we should try ECR first
         if self.registry and is_ecr_registry(self.registry) and check_aws_cli_and_creds():
             click.secho(f"Checking ECR for image {self.image_name()}...", fg="blue")
@@ -517,6 +576,25 @@ class ImageSpec:
             else:
                 # Registry is just the domain: account.dkr.ecr.region.amazonaws.com
                 repository = self.name
+
+            # For multi-arch images, check if all required architectures are present
+            if is_multi_arch:
+                click.secho(f"Multi-arch image detected, checking for architectures: {required_archs}", fg="blue")
+                archs = check_ecr_image_architectures(self.registry.split("/")[0], repository, self.tag)
+                if archs is not None:
+                    found_archs = set(archs)
+                    if found_archs >= required_archs:
+                        click.secho(f"Image {self.image_name()} found with all required architectures: {found_archs}", fg="green")
+                        return True
+                    elif found_archs:
+                        click.secho(f"Image {self.image_name()} found but missing architectures. Found: {found_archs}, Required: {required_archs}", fg="yellow")
+                        return False
+                    else:
+                        click.secho(f"Image {self.image_name()} not found in ECR.", fg="yellow")
+                        return False
+                # If architecture check failed, fall back to basic existence check
+                click.secho("Architecture check failed, falling back to basic existence check...", fg="yellow")
+
             ecr_result = check_ecr_image_exists(self.registry.split("/")[0], repository, self.tag)
             if ecr_result is not None:
                 if ecr_result:
