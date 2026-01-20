@@ -944,12 +944,15 @@ class DefaultImageBuilder(ImageSpecBuilder):
             platform, arch_tag = task
             click.secho(f"Building Nix image for {platform} with tag {arch_tag}", fg="blue")
 
+            # Note: We do NOT use --push here because the Dockerfile already handles
+            # pushing the nix2container image via `nix run .#docker.copyTo`.
+            # Using --push would push the Ubuntu-based build image instead of the
+            # nix2container image, which would overwrite the correct image.
             command = [
                 "depot",
                 "build",
                 "--tag",
                 arch_tag,
-                "--push",
                 "--platform",
                 platform,
                 "--project",
