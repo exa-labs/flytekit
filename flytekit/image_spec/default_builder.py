@@ -949,6 +949,7 @@ class DefaultImageBuilder(ImageSpecBuilder):
                 "build",
                 "--tag",
                 arch_tag,
+                "--push",
                 "--platform",
                 platform,
                 "--project",
