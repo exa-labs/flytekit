@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import warnings
 from pathlib import Path
 from string import Template
@@ -882,6 +883,13 @@ class DefaultImageBuilder(ImageSpecBuilder):
             tmp_path = Path(tmp_dir)
             create_docker_context(image_spec, tmp_path)
 
+            # Check if this is a multi-arch Nix build
+            platforms = [p.strip() for p in image_spec.platform.split(",")]
+            is_multi_arch = len(platforms) > 1
+
+            if image_spec.nix and is_multi_arch and image_spec.use_depot:
+                return self._build_multi_arch_nix(image_spec, tmp_dir, platforms, push)
+
             if image_spec.use_depot:
                 command = [
                     "depot",
@@ -910,3 +918,81 @@ class DefaultImageBuilder(ImageSpecBuilder):
             click.secho(f"Run command: {concat_command} ", fg="blue")
             run(command, check=True)
             return image_spec.image_name()
+
+    def _build_multi_arch_nix(self, image_spec: ImageSpec, tmp_dir: str, platforms: List[str], push: bool) -> str:
+        """Build multi-arch Nix images with architecture-specific tags, then create a manifest.
+
+        For each platform (e.g., linux/amd64, linux/arm64), this method:
+        1. Triggers a Depot build with an architecture-specific tag postfix
+        2. After all builds complete, creates a multi-arch manifest pointing to both images
+        """
+        base_image_name = image_spec.image_name()
+        arch_images = []
+
+        for platform in platforms:
+            arch = platform.split("/")[-1]  # Extract arch from "linux/amd64" -> "amd64"
+            arch_tag = f"{base_image_name}-{arch}"
+            arch_images.append(arch_tag)
+
+            click.secho(f"Building Nix image for {platform} with tag {arch_tag}", fg="blue")
+
+            command = [
+                "depot",
+                "build",
+                "--tag",
+                arch_tag,
+                "--platform",
+                platform,
+                "--project",
+                "bf5bv9t2mj",
+                tmp_dir,
+            ]
+
+            concat_command = " ".join(command)
+            click.secho(f"Run command: {concat_command}", fg="blue")
+            run(command, check=True)
+
+        if push and image_spec.registry:
+            self._create_multi_arch_manifest(base_image_name, arch_images)
+
+        return base_image_name
+
+    def _create_multi_arch_manifest(self, manifest_tag: str, arch_images: List[str]) -> None:
+        """Create a multi-arch manifest that points to architecture-specific images.
+
+        Uses `docker buildx imagetools create` to combine architecture-specific images
+        into a single multi-arch manifest list.
+        """
+        click.secho(f"Creating multi-arch manifest: {manifest_tag}", fg="blue")
+
+        # Verify all architecture images exist before creating manifest
+        for arch_image in arch_images:
+            click.secho(f"Verifying image exists: {arch_image}", fg="cyan")
+            max_attempts = 6
+            for attempt in range(1, max_attempts + 1):
+                result = run(
+                    ["docker", "buildx", "imagetools", "inspect", arch_image],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    click.secho(f"Found image: {arch_image}", fg="green")
+                    break
+                if attempt == max_attempts:
+                    raise RuntimeError(f"Image {arch_image} not found after {max_attempts} attempts")
+                click.secho(f"Attempt {attempt}/{max_attempts}: Image not found, waiting 10s...", fg="yellow")
+                time.sleep(10)
+
+        command = [
+            "docker",
+            "buildx",
+            "imagetools",
+            "create",
+            "--tag",
+            manifest_tag,
+        ] + arch_images
+
+        concat_command = " ".join(command)
+        click.secho(f"Run command: {concat_command}", fg="blue")
+        run(command, check=True)
+        click.secho(f"Multi-arch manifest created: {manifest_tag}", fg="green")
