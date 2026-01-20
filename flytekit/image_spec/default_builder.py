@@ -7,10 +7,11 @@ import sys
 import tempfile
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from string import Template
 from subprocess import run
-from typing import ClassVar, List, NamedTuple
+from typing import ClassVar, List, NamedTuple, Tuple
 
 import click
 import toml
@@ -920,20 +921,25 @@ class DefaultImageBuilder(ImageSpecBuilder):
             return image_spec.image_name()
 
     def _build_multi_arch_nix(self, image_spec: ImageSpec, tmp_dir: str, platforms: List[str], push: bool) -> str:
-        """Build multi-arch Nix images with architecture-specific tags, then create a manifest.
+        """Build multi-arch Nix images with architecture-specific tags in parallel, then create a manifest.
 
         For each platform (e.g., linux/amd64, linux/arm64), this method:
-        1. Triggers a Depot build with an architecture-specific tag postfix
+        1. Triggers Depot builds in parallel with architecture-specific tag postfixes
         2. After all builds complete, creates a multi-arch manifest pointing to both images
         """
         base_image_name = image_spec.image_name()
         arch_images = []
+        build_tasks = []
 
         for platform in platforms:
             arch = platform.split("/")[-1]  # Extract arch from "linux/amd64" -> "amd64"
             arch_tag = f"{base_image_name}-{arch}"
             arch_images.append(arch_tag)
+            build_tasks.append((platform, arch_tag))
 
+        def run_build(task: Tuple[str, str]) -> Tuple[str, bool, str]:
+            """Run a single Depot build and return (arch_tag, success, error_msg)."""
+            platform, arch_tag = task
             click.secho(f"Building Nix image for {platform} with tag {arch_tag}", fg="blue")
 
             command = [
@@ -950,7 +956,28 @@ class DefaultImageBuilder(ImageSpecBuilder):
 
             concat_command = " ".join(command)
             click.secho(f"Run command: {concat_command}", fg="blue")
-            run(command, check=True)
+            try:
+                run(command, check=True)
+                click.secho(f"Build completed for {platform}", fg="green")
+                return (arch_tag, True, "")
+            except subprocess.CalledProcessError as e:
+                return (arch_tag, False, str(e))
+
+        # Run all builds in parallel
+        click.secho(f"Starting parallel builds for {len(build_tasks)} platforms...", fg="blue")
+        with ThreadPoolExecutor(max_workers=len(build_tasks)) as executor:
+            futures = {executor.submit(run_build, task): task for task in build_tasks}
+            results = []
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        # Check for failures
+        failures = [(tag, err) for tag, success, err in results if not success]
+        if failures:
+            error_msgs = [f"{tag}: {err}" for tag, err in failures]
+            raise RuntimeError(f"Multi-arch builds failed:\n" + "\n".join(error_msgs))
+
+        click.secho(f"All {len(build_tasks)} builds completed successfully", fg="green")
 
         if push and image_spec.registry:
             self._create_multi_arch_manifest(base_image_name, arch_images)
