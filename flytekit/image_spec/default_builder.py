@@ -163,6 +163,11 @@ NIX_DOCKER_FILE_TEMPLATE = Template("""\
 # Use Ubuntu as base instead of nixpkgs/nix for better compatibility
 FROM ubuntu:24.04
 
+# Build arguments - IMAGE_NAME is passed by Depot via --build-arg
+# This allows each architecture-specific build to push to the correct tag
+ARG IMAGE_NAME
+ARG ECR_TOKEN
+
 # Install curl and other basic dependencies needed for the installer
 RUN apt-get update -y && \
     apt-get install -y \
@@ -191,14 +196,14 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
 WORKDIR /build
 
 # Build with cache mount - reuses the same cache across builds
+# Note: We use shell form (not exec form) so that ARG variables are expanded
 RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
-    nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
-    --image-parallel-copies 32 \
-    --dest-creds "AWS:$ECR_TOKEN"
+    nix run .#docker.copyTo -- "docker://$${IMAGE_NAME}" --dest-creds "AWS:$${ECR_TOKEN}" \
+    --image-parallel-copies 32
 """)
 
 
@@ -773,15 +778,11 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
         uv_venv_install = ""
 
     if image_spec.nix:
+        # For Nix builds, IMAGE_NAME and ECR_TOKEN are passed as build arguments
+        # at build time (via --build-arg), not substituted at Dockerfile generation time.
+        # This allows multi-arch builds to pass architecture-specific tags.
         docker_content = NIX_DOCKER_FILE_TEMPLATE.substitute(
-            IMAGE_NAME=image_spec.image_name(),
             COPY_LOCAL_PACKAGES=copy_local_packages,
-            ECR_TOKEN=subprocess.run(
-                ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip(),
         )
     else:
         docker_content = DOCKER_FILE_TEMPLATE.substitute(
@@ -902,6 +903,18 @@ class DefaultImageBuilder(ImageSpecBuilder):
                 ]
                 if image_spec.nix:
                     command.extend(["--project", "bf5bv9t2mj"])
+                    ecr_token = subprocess.run(
+                        ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout.strip()
+                    command.extend([
+                        "--build-arg",
+                        f"IMAGE_NAME={image_spec.image_name()}",
+                        "--build-arg",
+                        f"ECR_TOKEN={ecr_token}",
+                    ])
             else:
                 command = [
                     "docker",
@@ -933,6 +946,14 @@ class DefaultImageBuilder(ImageSpecBuilder):
         arch_images = []
         build_tasks = []
 
+        # Get ECR token once for all builds
+        ecr_token = subprocess.run(
+            ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
         for platform in platforms:
             arch = platform.split("/")[-1]  # Extract arch from "linux/amd64" -> "amd64"
             arch_tag = f"{base_image_name}-{arch}"
@@ -948,6 +969,8 @@ class DefaultImageBuilder(ImageSpecBuilder):
             # pushing the nix2container image via `nix run .#docker.copyTo`.
             # Using --push would push the Ubuntu-based build image instead of the
             # nix2container image, which would overwrite the correct image.
+            # We pass IMAGE_NAME and ECR_TOKEN as build arguments so each arch-specific
+            # build pushes to the correct tag.
             command = [
                 "depot",
                 "build",
@@ -957,6 +980,10 @@ class DefaultImageBuilder(ImageSpecBuilder):
                 platform,
                 "--project",
                 "bf5bv9t2mj",
+                "--build-arg",
+                f"IMAGE_NAME={arch_tag}",
+                "--build-arg",
+                f"ECR_TOKEN={ecr_token}",
                 tmp_dir,
             ]
 
