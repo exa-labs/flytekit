@@ -182,7 +182,7 @@ RUN apt-get update -y && \
 
 # Create nixbld group and users required by the Nix installer
 # The Determinate Systems installer expects these to exist
-# Note: $$ is used to escape $ for Python Template substitution
+# Note: double-dollar is used to escape dollar signs for Python Template substitution
 RUN groupadd -g 30000 nixbld && \
     for i in $$(seq 1 32); do \
         useradd -u $$((30000 + i)) -g nixbld -G nixbld -d /var/empty -s /sbin/nologin nixbld$$i; \
