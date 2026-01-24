@@ -201,10 +201,12 @@ WORKDIR /build
 # Build with cache mount - reuses the same cache across builds
 # Note: We use shell form (not exec form) so that ARG variables are expanded
 # Source nix profile and run nix directly (no daemon needed with build-users-group = "")
+# Remove /homeless-shelter to avoid "home directory exists" error when sandbox=false
 RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
+    rm -rf /homeless-shelter && \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
     nix run .#docker.copyTo -- "docker://$${IMAGE_NAME}" --dest-creds "AWS:$${ECR_TOKEN}" \
     --image-parallel-copies 32
