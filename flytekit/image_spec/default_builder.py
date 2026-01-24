@@ -180,15 +180,21 @@ RUN apt-get update -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Create nixbld group and users required by the Nix installer
+# The Determinate Systems installer expects these to exist
+RUN groupadd -g 30000 nixbld && \
+    for i in $(seq 1 32); do \
+        useradd -u $((30000 + i)) -g nixbld -G nixbld -d /var/empty -s /sbin/nologin nixbld$i; \
+    done
+
 # Install Nix using cache mount so it persists across builds
 # Use --init none since we're in a container and don't need systemd
-# Configure build-users-group to empty string to run without nixbld group
+# sandbox=false since we're in a container without proper namespace support
 RUN --mount=type=cache,target=/nix,id=nix-determinate \
     curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
         --determinate \
         --extra-conf "sandbox = false" \
-        --extra-conf "build-users-group = " \
         --extra-conf "max-substitution-jobs = 256" \
         --extra-conf "http-connections = 256" \
         --extra-conf "download-buffer-size = 1073741824" \
