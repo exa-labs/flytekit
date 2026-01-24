@@ -188,14 +188,10 @@ RUN groupadd -g 30000 nixbld && \
         useradd -u $$((30000 + i)) -g nixbld -G nixbld -d /var/empty -s /sbin/nologin nixbld$$i; \
     done
 
-# Install Nix using cache mount so it persists across builds
+# Install Nix fresh each build (no cache mount to avoid corruption issues)
 # Use --init none since we're in a container and don't need systemd
 # sandbox=false since we're in a container without proper namespace support
-# Thoroughly clean any existing Nix installation to avoid conflicts with cached builds
-# Use find to ensure all files including hidden ones are removed
-RUN --mount=type=cache,target=/nix,id=nix-determinate \
-    find /nix -mindepth 1 -delete 2>/dev/null || true && \
-    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+RUN curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
         --determinate \
         --extra-conf "sandbox = false" \
@@ -208,12 +204,11 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
 # Create a working directory for the build
 WORKDIR /build
 
-# Build with cache mount - reuses the same cache across builds
+# Build the Nix flake and push to ECR
 # Note: We use shell form (not exec form) so that ARG variables are expanded
-# Source nix profile and run nix directly (no daemon needed with build-users-group = "")
+# Source nix profile and run nix directly
 # Remove /homeless-shelter to avoid "home directory exists" error when sandbox=false
 RUN --mount=type=bind,source=.,target=/build/ \
-    --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
     rm -rf /homeless-shelter && \
