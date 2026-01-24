@@ -5,11 +5,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from string import Template
 from subprocess import run
-from typing import ClassVar, List, NamedTuple
+from typing import ClassVar, List, NamedTuple, Tuple
 
 import click
 import toml
@@ -161,6 +163,11 @@ NIX_DOCKER_FILE_TEMPLATE = Template("""\
 # Use Ubuntu as base instead of nixpkgs/nix for better compatibility
 FROM ubuntu:24.04
 
+# Build arguments - IMAGE_NAME is passed by Depot via --build-arg
+# This allows each architecture-specific build to push to the correct tag
+ARG IMAGE_NAME
+ARG ECR_TOKEN
+
 # Install curl and other basic dependencies needed for the installer
 RUN apt-get update -y && \
     apt-get install -y \
@@ -173,12 +180,21 @@ RUN apt-get update -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Nix using cache mount so it persists across builds
-RUN --mount=type=cache,target=/nix,id=nix-determinate \
-    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+# Create nixbld group and users required by the Nix installer
+# The Determinate Systems installer expects these to exist
+# Note: double-dollar is used to escape dollar signs for Python Template substitution
+RUN groupadd -g 30000 nixbld && \
+    for i in $$(seq 1 32); do \
+        useradd -u $$((30000 + i)) -g nixbld -G nixbld -d /var/empty -s /sbin/nologin nixbld$$i; \
+    done
+
+# Install Nix fresh each build (no cache mount to avoid corruption issues)
+# Use --init none since we're in a container and don't need systemd
+# sandbox=false since we're in a container without proper namespace support
+RUN curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
         --determinate \
-        --extra-conf "sandbox = true" \
+        --extra-conf "sandbox = false" \
         --extra-conf "max-substitution-jobs = 256" \
         --extra-conf "http-connections = 256" \
         --extra-conf "download-buffer-size = 1073741824" \
@@ -188,15 +204,17 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
 # Create a working directory for the build
 WORKDIR /build
 
-# Build with cache mount - reuses the same cache across builds
+# Build the Nix flake and push to ECR
+# Note: We use shell form (not exec form) so that ARG variables are expanded
+# Source nix profile and run nix directly
+# Remove /homeless-shelter to avoid "home directory exists" error when sandbox=false
 RUN --mount=type=bind,source=.,target=/build/ \
-    --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
+    rm -rf /homeless-shelter && \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
-    nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
-    --image-parallel-copies 32 \
-    --dest-creds "AWS:$ECR_TOKEN"
+    nix run .#docker.copyTo -- "docker://$${IMAGE_NAME}" --dest-creds "AWS:$${ECR_TOKEN}" \
+    --image-parallel-copies 32
 """)
 
 
@@ -771,15 +789,11 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
         uv_venv_install = ""
 
     if image_spec.nix:
+        # For Nix builds, IMAGE_NAME and ECR_TOKEN are passed as build arguments
+        # at build time (via --build-arg), not substituted at Dockerfile generation time.
+        # This allows multi-arch builds to pass architecture-specific tags.
         docker_content = NIX_DOCKER_FILE_TEMPLATE.substitute(
-            IMAGE_NAME=image_spec.image_name(),
             COPY_LOCAL_PACKAGES=copy_local_packages,
-            ECR_TOKEN=subprocess.run(
-                ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip(),
         )
     else:
         docker_content = DOCKER_FILE_TEMPLATE.substitute(
@@ -882,6 +896,13 @@ class DefaultImageBuilder(ImageSpecBuilder):
             tmp_path = Path(tmp_dir)
             create_docker_context(image_spec, tmp_path)
 
+            # Check if this is a multi-arch Nix build
+            platforms = [p.strip() for p in image_spec.platform.split(",")]
+            is_multi_arch = len(platforms) > 1
+
+            if image_spec.nix and is_multi_arch and image_spec.use_depot:
+                return self._build_multi_arch_nix(image_spec, tmp_dir, platforms, push)
+
             if image_spec.use_depot:
                 command = [
                     "depot",
@@ -893,6 +914,18 @@ class DefaultImageBuilder(ImageSpecBuilder):
                 ]
                 if image_spec.nix:
                     command.extend(["--project", "bf5bv9t2mj"])
+                    ecr_token = subprocess.run(
+                        ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout.strip()
+                    command.extend([
+                        "--build-arg",
+                        f"IMAGE_NAME={image_spec.image_name()}",
+                        "--build-arg",
+                        f"ECR_TOKEN={ecr_token}",
+                    ])
             else:
                 command = [
                     "docker",
@@ -912,3 +945,125 @@ class DefaultImageBuilder(ImageSpecBuilder):
             click.secho(f"Run command: {concat_command} ", fg="blue")
             run(command, check=True)
             return image_spec.image_name()
+
+    def _build_multi_arch_nix(self, image_spec: ImageSpec, tmp_dir: str, platforms: List[str], push: bool) -> str:
+        """Build multi-arch Nix images with architecture-specific tags in parallel, then create a manifest.
+
+        For each platform (e.g., linux/amd64, linux/arm64), this method:
+        1. Triggers Depot builds in parallel with architecture-specific tag postfixes
+        2. After all builds complete, creates a multi-arch manifest pointing to both images
+        """
+        base_image_name = image_spec.image_name()
+        arch_images = []
+        build_tasks = []
+
+        # Get ECR token once for all builds
+        ecr_token = subprocess.run(
+            ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        for platform in platforms:
+            arch = platform.split("/")[-1]  # Extract arch from "linux/amd64" -> "amd64"
+            arch_tag = f"{base_image_name}-{arch}"
+            arch_images.append(arch_tag)
+            build_tasks.append((platform, arch_tag))
+
+        def run_build(task: Tuple[str, str]) -> Tuple[str, bool, str]:
+            """Run a single Depot build and return (arch_tag, success, error_msg)."""
+            platform, arch_tag = task
+            click.secho(f"Building Nix image for {platform} with tag {arch_tag}", fg="blue")
+
+            # Note: We do NOT use --push here because the Dockerfile already handles
+            # pushing the nix2container image via `nix run .#docker.copyTo`.
+            # Using --push would push the Ubuntu-based build image instead of the
+            # nix2container image, which would overwrite the correct image.
+            # We pass IMAGE_NAME and ECR_TOKEN as build arguments so each arch-specific
+            # build pushes to the correct tag.
+            command = [
+                "depot",
+                "build",
+                "--tag",
+                arch_tag,
+                "--platform",
+                platform,
+                "--project",
+                "bf5bv9t2mj",
+                "--build-arg",
+                f"IMAGE_NAME={arch_tag}",
+                "--build-arg",
+                f"ECR_TOKEN={ecr_token}",
+                tmp_dir,
+            ]
+
+            concat_command = " ".join(command)
+            click.secho(f"Run command: {concat_command}", fg="blue")
+            try:
+                run(command, check=True)
+                click.secho(f"Build completed for {platform}", fg="green")
+                return (arch_tag, True, "")
+            except subprocess.CalledProcessError as e:
+                return (arch_tag, False, str(e))
+
+        # Run all builds in parallel
+        click.secho(f"Starting parallel builds for {len(build_tasks)} platforms...", fg="blue")
+        with ThreadPoolExecutor(max_workers=len(build_tasks)) as executor:
+            futures = {executor.submit(run_build, task): task for task in build_tasks}
+            results = []
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        # Check for failures
+        failures = [(tag, err) for tag, success, err in results if not success]
+        if failures:
+            error_msgs = [f"{tag}: {err}" for tag, err in failures]
+            raise RuntimeError(f"Multi-arch builds failed:\n" + "\n".join(error_msgs))
+
+        click.secho(f"All {len(build_tasks)} builds completed successfully", fg="green")
+
+        if push and image_spec.registry:
+            self._create_multi_arch_manifest(base_image_name, arch_images)
+
+        return base_image_name
+
+    def _create_multi_arch_manifest(self, manifest_tag: str, arch_images: List[str]) -> None:
+        """Create a multi-arch manifest that points to architecture-specific images.
+
+        Uses `docker buildx imagetools create` to combine architecture-specific images
+        into a single multi-arch manifest list.
+        """
+        click.secho(f"Creating multi-arch manifest: {manifest_tag}", fg="blue")
+
+        # Verify all architecture images exist before creating manifest
+        for arch_image in arch_images:
+            click.secho(f"Verifying image exists: {arch_image}", fg="cyan")
+            max_attempts = 6
+            for attempt in range(1, max_attempts + 1):
+                result = run(
+                    ["docker", "buildx", "imagetools", "inspect", arch_image],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    click.secho(f"Found image: {arch_image}", fg="green")
+                    break
+                if attempt == max_attempts:
+                    raise RuntimeError(f"Image {arch_image} not found after {max_attempts} attempts")
+                click.secho(f"Attempt {attempt}/{max_attempts}: Image not found, waiting 10s...", fg="yellow")
+                time.sleep(10)
+
+        command = [
+            "docker",
+            "buildx",
+            "imagetools",
+            "create",
+            "--tag",
+            manifest_tag,
+        ] + arch_images
+
+        concat_command = " ".join(command)
+        click.secho(f"Run command: {concat_command}", fg="blue")
+        run(command, check=True)
+        click.secho(f"Multi-arch manifest created: {manifest_tag}", fg="green")
