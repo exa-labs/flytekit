@@ -191,9 +191,10 @@ RUN groupadd -g 30000 nixbld && \
 # Install Nix using cache mount so it persists across builds
 # Use --init none since we're in a container and don't need systemd
 # sandbox=false since we're in a container without proper namespace support
-# Remove any existing Nix installation to avoid conflicts with cached builds
+# Thoroughly clean any existing Nix installation to avoid conflicts with cached builds
+# Use find to ensure all files including hidden ones are removed
 RUN --mount=type=cache,target=/nix,id=nix-determinate \
-    rm -rf /nix/* && \
+    find /nix -mindepth 1 -delete 2>/dev/null || true && \
     curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
         --determinate \
