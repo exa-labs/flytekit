@@ -715,7 +715,11 @@ class ImageSpecBuilder:
                 return True
             click.secho(f"Image {img_name} found. Skip building.", fg="blue")
         else:
-            click.secho(f"Flytekit assumes the image {img_name} already exists.", fg="blue")
+            raise RuntimeError(
+                f"Could not verify if image {img_name} exists. "
+                f"Please ensure Docker is running and AWS CLI is configured for ECR access. "
+                f"You can also set FLYTE_FORCE_PUSH_IMAGE_SPEC=1 to force rebuild."
+            )
         return False
 
 
