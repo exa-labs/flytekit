@@ -715,7 +715,11 @@ class ImageSpecBuilder:
                 return True
             click.secho(f"Image {img_name} found. Skip building.", fg="blue")
         else:
-            click.secho(f"Flytekit assumes the image {img_name} already exists.", fg="blue")
+            click.secho(
+                f"Could not verify if image {img_name} exists. Building to be safe...",
+                fg="yellow",
+            )
+            return True
         return False
 
 
