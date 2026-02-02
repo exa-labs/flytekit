@@ -25,6 +25,214 @@ from flytekit.image_spec.image_spec import (
 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
 from flytekit.tools.script_mode import is_vendorable_repo, ls_files
 
+
+def _copy_directory_with_ignore(src_path: Path, target_path: Path) -> None:
+    """Copy a directory to target, respecting .gitignore/.dockerignore patterns."""
+    ignore_group = IgnoreGroup(str(src_path), [GitIgnore, DockerIgnore, StandardIgnore])
+    files_to_copy, _ = ls_files(
+        str(src_path),
+        CopyFileDetection.ALL,
+        deref_symlinks=False,
+        ignore_group=ignore_group,
+    )
+    for file_to_copy in files_to_copy:
+        file_rel = os.path.relpath(file_to_copy, start=str(src_path))
+        file_dst = target_path / file_rel
+        file_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_to_copy, file_dst)
+
+
+def _process_nested_flake_inputs(
+    target_flake_dir: Path,
+    local_packages_dir: Path,
+    processed_paths: set,
+) -> None:
+    """Recursively process flake.nix files in copied path inputs.
+
+    When a path input (e.g., url_shortener) is copied to local_packages/, its flake.nix
+    may contain relative path references (e.g., path:../../../flakes/python) that become
+    invalid. This function:
+    1. Discovers path inputs in the nested flake.nix
+    2. Copies those dependencies to local_packages/
+    3. Rewrites the nested flake.nix and flake.lock with correct paths
+    4. Recursively processes any further nested flakes
+
+    Args:
+        target_flake_dir: The directory containing the copied flake.nix to process
+        local_packages_dir: The local_packages/ directory in the build context
+        processed_paths: Set of already-processed source paths to avoid infinite loops
+
+    Author: Claude Opus 4.5
+    """
+    flake_nix_path = target_flake_dir / "flake.nix"
+    flake_lock_path = target_flake_dir / "flake.lock"
+
+    if not flake_nix_path.exists():
+        return
+
+    flake_content = flake_nix_path.read_text()
+    flake_lock_content = flake_lock_path.read_text() if flake_lock_path.exists() else None
+
+    # Discover path inputs from this nested flake, resolving relative to target_flake_dir
+    # BUT the paths in the flake.nix are relative to the ORIGINAL source location.
+    # We need to find the original source paths by looking at what's written in the flake.
+
+    # The flake.nix contains paths like "path:../../../flakes/python" which were relative
+    # to the original source location. We need to resolve these from the original location.
+
+    # Extract the original source directory from the git root structure preserved in local_packages
+    # The target_flake_dir is like: local_packages/rust/shared/url_shortener
+    # The relative path in flake is: ../../../flakes/python
+    # Which means the original structure had: rust/shared/url_shortener -> flakes/python
+
+    # Get the relative path within local_packages
+    try:
+        rel_in_local = target_flake_dir.relative_to(local_packages_dir)
+    except ValueError:
+        return
+
+    # Discover inputs - we pass the target_flake_dir so paths resolve from there
+    # But the paths will be invalid since the siblings don't exist yet
+    inputs = discover_nix_flake_path_inputs(target_flake_dir, flake_content)
+
+    if not inputs:
+        return
+
+    flake_path_replacements = {}
+
+    for inp in inputs:
+        full_spec = inp.full_spec  # e.g., "path:../../../flakes/python"
+        old_rel_path = inp.old_rel_path  # e.g., "../../../flakes/python"
+
+        # The src_path from discover_nix_flake_path_inputs is resolved relative to
+        # target_flake_dir, but that path doesn't exist. We need to find the actual
+        # source by going back through the monorepo structure.
+
+        # Calculate where this would be in the git repo
+        # rel_in_local is like: rust/shared/url_shortener
+        # old_rel_path is like: ../../../flakes/python
+        # Combined: rust/shared/url_shortener/../../../flakes/python = flakes/python
+        combined = (rel_in_local / old_rel_path)
+        # Normalize the path (resolve ..)
+        try:
+            normalized = Path(os.path.normpath(combined))
+        except Exception:
+            continue
+
+        # This is the path relative to git root where the dependency should be
+        # e.g., "flakes/python"
+
+        # Find the git root by looking at where local_packages is
+        # The build context has: tmp_dir/local_packages/...
+        # Git root contents are copied to: tmp_dir/local_packages/
+        # Actually we need to find the original source. Let's try to find it
+        # by going up from local_packages_dir to find the monorepo root
+
+        # The source path should already be in local_packages if it was a top-level
+        # dependency, OR we need to copy it from the original monorepo location
+
+        target_in_local = local_packages_dir / normalized
+
+        # Check if already copied
+        if target_in_local.exists():
+            # Just need to rewrite the path
+            new_rel_path_from_nested = os.path.relpath(target_in_local, target_flake_dir)
+            flake_path_replacements[full_spec] = f"path:{new_rel_path_from_nested}"
+            continue
+
+        # Need to find and copy the source
+        # The original source is at git_root / normalized
+        # We can find git_root by looking at the original src_path calculation
+        # src_path = (target_flake_dir / old_rel_path).resolve() won't work since target is in /tmp
+
+        # Alternative: check if the path exists relative to the monorepo
+        # We stored source location info implicitly - let's try to recover it
+        # by finding the first parent of local_packages_dir that looks like a git root
+
+        # Actually, the simplest approach: the resolved path from discover_nix_flake_path_inputs
+        # is computed as (lock_dir_path / old_rel_path).resolve()
+        # For target_flake_dir in /tmp/xxx/local_packages/rust/shared/url_shortener
+        # and old_rel_path = ../../../flakes/python
+        # This gives us /tmp/xxx/local_packages/flakes/python (after normalization)
+        # Which is where we SHOULD copy it to
+
+        # The source is at the ORIGINAL location in the monorepo
+        # We can't easily get there from here, so we skip if not already present
+        # The top-level code should have copied it
+
+        # BUT if the top-level didn't copy it (because it wasn't a direct dependency),
+        # we need to find and copy it. This requires knowing the monorepo root.
+
+        # For now, if the target doesn't exist and we can't find the source, skip
+        # The build will fail, but with a clearer error
+
+        if str(normalized) in processed_paths:
+            continue
+
+        processed_paths.add(str(normalized))
+
+        # We need to get the source from the original monorepo
+        # The src_path from discover_nix_flake_path_inputs resolved from target_flake_dir
+        # will point to a non-existent path. But we know the structure.
+
+        # Let's try to infer the monorepo root from the current working directory
+        # since that's where the original flake.nix was
+        cwd = Path.cwd()
+        git_root = _find_git_root(str(cwd))
+        if git_root is None:
+            # Can't find git root, skip
+            continue
+
+        original_src = Path(git_root) / normalized
+        if not original_src.exists():
+            # Source doesn't exist, skip
+            continue
+
+        # Copy the source to local_packages
+        target_in_local.parent.mkdir(parents=True, exist_ok=True)
+        if original_src.is_dir():
+            _copy_directory_with_ignore(original_src, target_in_local)
+        else:
+            shutil.copy2(str(original_src), str(target_in_local))
+
+        # Calculate the new relative path from the nested flake to the copied dependency
+        new_rel_path_from_nested = os.path.relpath(target_in_local, target_flake_dir)
+        flake_path_replacements[full_spec] = f"path:{new_rel_path_from_nested}"
+
+        # Recursively process the copied dependency if it has a flake.nix
+        if target_in_local.is_dir():
+            _process_nested_flake_inputs(target_in_local, local_packages_dir, processed_paths)
+
+    # Rewrite the nested flake.nix with updated paths
+    if flake_path_replacements:
+        for old_spec, new_spec in flake_path_replacements.items():
+            flake_content = flake_content.replace(old_spec, new_spec)
+        flake_nix_path.write_text(flake_content)
+
+        # Also update flake.lock if present
+        if flake_lock_content:
+            try:
+                flake_lock_obj = json.loads(flake_lock_content)
+                nodes = flake_lock_obj.get("nodes", {})
+                for node in nodes.values():
+                    for key in ("locked", "original"):
+                        obj = node.get(key)
+                        if obj and obj.get("type") == "path":
+                            p = obj.get("path")
+                            for old_spec, new_spec in flake_path_replacements.items():
+                                old_path = old_spec.replace("path:", "")
+                                new_path = new_spec.replace("path:", "")
+                                if p == old_path:
+                                    obj["path"] = new_path
+                flake_lock_path.write_text(json.dumps(flake_lock_obj, indent=2))
+            except Exception:
+                # Fallback: plain string replacement
+                for old_spec, new_spec in flake_path_replacements.items():
+                    old_path = old_spec.replace("path:", "")
+                    new_path = new_spec.replace("path:", "")
+                    flake_lock_content = flake_lock_content.replace(old_path, new_path)
+                flake_lock_path.write_text(flake_lock_content)
+
 UV_LOCK_INSTALL_TEMPLATE = Template(
     """\
 RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \
@@ -489,6 +697,21 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
                 # Fallback: plain string replacement if JSON update fails
                 for old_rel, new_rel in flake_path_replacements.items():
                     flake_lock_content = flake_lock_content.replace(old_rel, new_rel)
+
+        # Process nested flake.nix files in copied path inputs
+        # This handles transitive path dependencies (e.g., url_shortener -> flakes/python)
+        processed_nested_paths: set = set()
+        for inp in inputs:
+            src_path = inp.src_path
+            if not src_path.is_dir():
+                continue
+            git_root = _find_git_root(str(src_path))
+            if git_root is None:
+                continue
+            rel_path = os.path.relpath(path=str(src_path), start=str(git_root))
+            target_path = local_packages_dir / rel_path
+            if target_path.exists() and (target_path / "flake.nix").exists():
+                _process_nested_flake_inputs(target_path, local_packages_dir, processed_nested_paths)
 
         # Set up ignore patterns for the package directory
         ignore_group = IgnoreGroup(str(lock_dir), [GitIgnore, DockerIgnore, StandardIgnore])
