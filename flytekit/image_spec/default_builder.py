@@ -227,6 +227,67 @@ def _is_flytekit(package: str) -> bool:
 # Use shared _find_git_root from image_spec
 
 
+def _copy_cargo_path_deps(package_path: Path, local_packages_dir: Path, copied_paths: set[str] | None = None):
+    """Discover Cargo path dependencies in a local package and copy them into the Docker build context.
+
+    Maturin-based packages (Rust crates with Python bindings) declare Rust dependencies via
+    path references in Cargo.toml. These are invisible to uv.lock, so we must traverse and
+    copy them explicitly or cargo/maturin will fail during the image build.
+    """
+    if copied_paths is None:
+        copied_paths = set()
+
+    cargo_toml_path = package_path / "Cargo.toml"
+    if not cargo_toml_path.exists():
+        return
+
+    try:
+        cargo_data = toml.load(str(cargo_toml_path))
+    except Exception:
+        return
+
+    git_root = _find_git_root(package_path)
+    if git_root is None:
+        return
+
+    dep_sections = ["dependencies", "build-dependencies", "dev-dependencies"]
+    for section in dep_sections:
+        deps = cargo_data.get(section, {})
+        for dep_spec in deps.values():
+            if not isinstance(dep_spec, dict) or "path" not in dep_spec:
+                continue
+
+            dep_abs = (package_path / dep_spec["path"]).resolve()
+            dep_abs_str = str(dep_abs)
+
+            if dep_abs_str in copied_paths or not dep_abs.is_dir():
+                continue
+            copied_paths.add(dep_abs_str)
+
+            rel_path = os.path.relpath(path=dep_abs, start=git_root)
+            target_path = local_packages_dir / rel_path
+
+            if target_path.exists():
+                continue
+
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+
+            ignore_group = IgnoreGroup(str(dep_abs), [GitIgnore, DockerIgnore, StandardIgnore])
+            files_to_copy, _ = ls_files(
+                str(dep_abs),
+                CopyFileDetection.ALL,
+                deref_symlinks=False,
+                ignore_group=ignore_group,
+            )
+            for f in files_to_copy:
+                f_rel = os.path.relpath(f, start=str(dep_abs))
+                f_dst = target_path / f_rel
+                f_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, f_dst)
+
+            _copy_cargo_path_deps(dep_abs, local_packages_dir, copied_paths)
+
+
 def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     """Copy local packages into the Docker build context and update their paths in the lock file."""
     if not image_spec.requirements or not os.path.basename(image_spec.requirements) == "uv.lock":
@@ -333,6 +394,8 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
                 file_target_path = target_path / file_rel_path
                 file_target_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(file_to_copy, file_target_path)
+
+            _copy_cargo_path_deps(package_path, local_packages_dir)
         else:
             shutil.copy2(package_path, target_path)
 
