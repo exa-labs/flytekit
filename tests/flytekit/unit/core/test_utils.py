@@ -1,4 +1,8 @@
+import json
+import logging
+import os
 from collections import OrderedDict
+from unittest.mock import patch
 
 import pytest
 
@@ -6,6 +10,7 @@ import flytekit
 from flytekit import FlyteContextManager, task
 from flytekit.configuration import ImageConfig, SerializationSettings
 from flytekit.core.utils import ClassDecorator, _dnsify, timeit, str2bool
+from flytekit.loggers import telemetry_logger
 from flytekit.tools.translator import get_serializable_task
 from tests.flytekit.unit.test_translator import default_img
 
@@ -114,3 +119,136 @@ def test_str_2_bool():
     assert str2bool("t")
     assert not str2bool("f")
     assert str2bool("1")
+
+
+def test_timeit_telemetry_success():
+    with patch.object(telemetry_logger, "info") as mock_info:
+        with timeit("test_step"):
+            pass
+
+    mock_info.assert_called_once()
+    call_args = mock_info.call_args
+    assert call_args[0][0] == "flytekit_step"
+    extra = call_args[1]["extra"]
+    assert extra["event"] == "flytekit_step"
+    assert extra["step"] == "test_step"
+    assert extra["status"] == "success"
+    assert "wall_time_s" in extra
+    assert "process_time_s" in extra
+    assert extra["wall_time_s"] >= 0
+    assert extra["process_time_s"] >= 0
+    assert "error_type" not in extra
+
+
+def test_timeit_telemetry_error():
+    with patch.object(telemetry_logger, "info") as mock_info:
+        with pytest.raises(ValueError):
+            with timeit("failing_step"):
+                raise ValueError("test error")
+
+    mock_info.assert_called_once()
+    extra = mock_info.call_args[1]["extra"]
+    assert extra["status"] == "error"
+    assert extra["error_type"] == "ValueError"
+    assert extra["step"] == "failing_step"
+
+
+def test_timeit_telemetry_extras():
+    with patch.object(telemetry_logger, "info") as mock_info:
+        with timeit("step_with_extras", input_size_bytes=1024, output_count=3):
+            pass
+
+    extra = mock_info.call_args[1]["extra"]
+    assert extra["input_size_bytes"] == 1024
+    assert extra["output_count"] == 3
+
+
+def test_timeit_telemetry_context_enrichment():
+    @task
+    def dummy_task() -> int:
+        return 42
+
+    with patch.object(telemetry_logger, "info") as mock_info:
+        dummy_task()
+
+    calls = [c for c in mock_info.call_args_list if c[0][0] == "flytekit_step"]
+    assert len(calls) > 0
+
+
+def test_telemetry_disabled():
+    from flytekit.loggers import _initialize_telemetry_logger
+
+    original_val = os.environ.get("FLYTE_TELEMETRY_ENABLED")
+    try:
+        os.environ["FLYTE_TELEMETRY_ENABLED"] = "0"
+        _initialize_telemetry_logger()
+        assert telemetry_logger.level > logging.CRITICAL
+    finally:
+        if original_val is not None:
+            os.environ["FLYTE_TELEMETRY_ENABLED"] = original_val
+        else:
+            os.environ.pop("FLYTE_TELEMETRY_ENABLED", None)
+        _initialize_telemetry_logger()
+
+
+def test_telemetry_enabled_by_default():
+    from flytekit.loggers import _initialize_telemetry_logger
+
+    original_val = os.environ.pop("FLYTE_TELEMETRY_ENABLED", None)
+    try:
+        _initialize_telemetry_logger()
+        assert telemetry_logger.level == logging.INFO
+    finally:
+        if original_val is not None:
+            os.environ["FLYTE_TELEMETRY_ENABLED"] = original_val
+        _initialize_telemetry_logger()
+
+
+def test_timeit_telemetry_json_format():
+    handler = logging.StreamHandler()
+    from pythonjsonlogger import jsonlogger
+    handler.setFormatter(jsonlogger.JsonFormatter(fmt="%(asctime)s %(name)s %(levelname)s %(message)s"))
+
+    original_handlers = telemetry_logger.handlers[:]
+    original_level = telemetry_logger.level
+    telemetry_logger.handlers.clear()
+    telemetry_logger.addHandler(handler)
+    telemetry_logger.setLevel(logging.INFO)
+
+    try:
+        with patch.object(handler, "emit") as mock_emit:
+            with timeit("json_test_step"):
+                pass
+
+        mock_emit.assert_called()
+        record = mock_emit.call_args[0][0]
+        formatted = handler.format(record)
+        parsed = json.loads(formatted)
+        assert parsed["event"] == "flytekit_step"
+        assert parsed["step"] == "json_test_step"
+        assert parsed["status"] == "success"
+    finally:
+        telemetry_logger.handlers.clear()
+        for h in original_handlers:
+            telemetry_logger.addHandler(h)
+        telemetry_logger.setLevel(original_level)
+
+
+def test_timeit_all_steps_in_task_execution():
+    @task
+    def add_one(x: int) -> int:
+        return x + 1
+
+    with patch.object(telemetry_logger, "info") as mock_info:
+        result = add_one(x=5)
+
+    assert result == 6
+
+    step_names = [
+        c[1]["extra"]["step"]
+        for c in mock_info.call_args_list
+        if c[0][0] == "flytekit_step"
+    ]
+    assert "pre_execute" in step_names
+    assert "Execute user level code" in step_names
+    assert "post_execute" in step_names
