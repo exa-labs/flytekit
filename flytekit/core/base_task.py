@@ -68,7 +68,7 @@ from flytekit.core.promise import (
 )
 from flytekit.core.tracker import TrackedInstance
 from flytekit.core.type_engine import TypeEngine, TypeTransformerFailedError
-from flytekit.core.utils import timeit
+from flytekit.core.utils import timeit, _safe_serialize_params
 from flytekit.deck import DeckField
 from flytekit.exceptions.system import (
     FlyteDownloadDataException,
@@ -750,7 +750,7 @@ class PythonTask(TrackedInstance, Task, Generic[T]):
             # TODO: Logger should auto inject the current context information to indicate if the task is running within
             #   a workflow or a subworkflow etc
             logger.info(f"Invoking {self.name} with inputs: {native_inputs}")
-            with timeit("Execute user level code"):
+            with timeit("Execute user level code", params=_safe_serialize_params(native_inputs)):
                 try:
                     native_outputs = self.execute(**native_inputs)
                 except Exception as e:

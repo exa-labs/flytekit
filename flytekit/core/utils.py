@@ -1,6 +1,7 @@
 import copy
 import datetime
 import inspect
+import json
 import os
 import shutil
 import tempfile
@@ -282,6 +283,27 @@ class AutoDeletingTempDir(Directory):
 
     def __str__(self):
         return self.__repr__()
+
+
+_PARAM_MAX_LEN = 256
+_PARAMS_MAX_TOTAL = 2048
+
+
+def _safe_serialize_params(kwargs: Dict[str, Any], max_len: int = _PARAM_MAX_LEN) -> str:
+    out: Dict[str, str] = {}
+    total = 0
+    for k, v in kwargs.items():
+        try:
+            s = json.dumps(v, default=repr)
+        except Exception:
+            s = repr(v)
+        if len(s) > max_len:
+            s = s[:max_len] + "..."
+        out[k] = s
+        total += len(s)
+        if total > _PARAMS_MAX_TOTAL:
+            break
+    return json.dumps(out)
 
 
 class timeit:

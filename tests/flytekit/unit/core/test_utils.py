@@ -254,6 +254,26 @@ def test_timeit_all_steps_in_task_execution():
     assert "post_execute" in step_names
 
 
+def test_execute_step_includes_params():
+    @task
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    with patch.object(telemetry_logger, "info") as mock_info:
+        out = add(a=3, b=4)
+
+    assert out == 7
+
+    calls = [c for c in mock_info.call_args_list if c[0][0] == "flytekit_step"]
+    exec_calls = [c for c in calls if c[1]["extra"]["step"] == "Execute user level code"]
+    assert exec_calls, "expected an execute step telemetry event"
+    params_json = exec_calls[0][1]["extra"].get("params")
+    assert params_json
+    data = json.loads(params_json)
+    assert data["a"] == "3"
+    assert data["b"] == "4"
+
+
 def test_clickhouse_sink_disabled_without_url():
     sink = ClickHouseTelemetrySink()
     assert not sink.enabled
