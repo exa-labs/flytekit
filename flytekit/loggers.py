@@ -5,7 +5,6 @@ import os
 import threading
 import typing
 import urllib.request
-import urllib.error
 from base64 import b64encode
 from datetime import datetime, timezone
 
