@@ -1,6 +1,13 @@
+import atexit
+import json
 import logging
 import os
+import threading
 import typing
+import urllib.request
+import urllib.error
+from base64 import b64encode
+from datetime import datetime, timezone
 
 from pythonjsonlogger import jsonlogger
 
@@ -19,6 +26,11 @@ LOGGING_FMT_ENV_VAR = "FLYTE_SDK_LOGGING_FORMAT"
 LOGGING_RICH_FMT_ENV_VAR = "FLYTE_SDK_RICH_TRACEBACKS"
 
 LOGGING_TELEMETRY_ENV_VAR = "FLYTE_TELEMETRY_ENABLED"
+CLICKHOUSE_URL_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_URL"
+CLICKHOUSE_USER_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_USER"
+CLICKHOUSE_PASSWORD_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_PASSWORD"
+CLICKHOUSE_DATABASE_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_DATABASE"
+CLICKHOUSE_TABLE_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_TABLE"
 
 # By default, the root flytekit logger to debug so everything is logged, but enable fine-tuning
 logger = logging.getLogger("flytekit")
@@ -200,19 +212,107 @@ def is_display_progress_enabled() -> bool:
     return os.getenv(LOGGING_RICH_FMT_ENV_VAR, False)
 
 
+class ClickHouseTelemetrySink:
+    """Buffers telemetry events and flushes to ClickHouse via HTTP in a background thread.
+
+    Uses ClickHouse's HTTP interface with FORMAT JSONEachRow for zero-dependency inserts.
+    Events are buffered in memory and flushed when the buffer reaches FLUSH_THRESHOLD or
+    at process exit via atexit. All network I/O happens off the critical path.
+
+    Env vars:
+        FLYTE_TELEMETRY_CLICKHOUSE_URL      — e.g. https://host:8443
+        FLYTE_TELEMETRY_CLICKHOUSE_USER      — ClickHouse username
+        FLYTE_TELEMETRY_CLICKHOUSE_PASSWORD  — ClickHouse password
+        FLYTE_TELEMETRY_CLICKHOUSE_DATABASE  — database (default: "default")
+        FLYTE_TELEMETRY_CLICKHOUSE_TABLE     — table  (default: "flytekit_telemetry")
+    """
+
+    FLUSH_THRESHOLD = 50
+
+    def __init__(self):
+        self._url = os.environ.get(CLICKHOUSE_URL_ENV_VAR, "")
+        self._user = os.environ.get(CLICKHOUSE_USER_ENV_VAR, "default")
+        self._password = os.environ.get(CLICKHOUSE_PASSWORD_ENV_VAR, "")
+        self._database = os.environ.get(CLICKHOUSE_DATABASE_ENV_VAR, "default")
+        self._table = os.environ.get(CLICKHOUSE_TABLE_ENV_VAR, "flytekit_telemetry")
+        self._buffer: typing.List[typing.Dict[str, typing.Any]] = []
+        self._lock = threading.Lock()
+        self._enabled = bool(self._url)
+        if self._enabled:
+            atexit.register(self.flush)
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def send(self, event: typing.Dict[str, typing.Any]):
+        """Buffer a telemetry event. Triggers a background flush when threshold is reached."""
+        if not self._enabled:
+            return
+        event["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        to_flush = None
+        with self._lock:
+            self._buffer.append(event)
+            if len(self._buffer) >= self.FLUSH_THRESHOLD:
+                to_flush = self._buffer[:]
+                self._buffer.clear()
+        if to_flush is not None:
+            threading.Thread(target=self._do_flush, args=(to_flush,), daemon=True).start()
+
+    def flush(self):
+        """Flush all buffered events. Called at exit and can be called manually."""
+        with self._lock:
+            to_flush = self._buffer[:]
+            self._buffer.clear()
+        if to_flush:
+            self._do_flush(to_flush)
+
+    def _do_flush(self, events: typing.List[typing.Dict[str, typing.Any]]):
+        try:
+            body = "\n".join(json.dumps(e) for e in events).encode("utf-8")
+            query = f"INSERT INTO {self._database}.{self._table} FORMAT JSONEachRow"
+            url = f"{self._url}/?query={urllib.request.quote(query)}"
+            credentials = b64encode(f"{self._user}:{self._password}".encode()).decode()
+            req = urllib.request.Request(
+                url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Basic {credentials}",
+                },
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+
+_clickhouse_sink: typing.Optional[ClickHouseTelemetrySink] = None
+
+
+def get_clickhouse_sink() -> typing.Optional[ClickHouseTelemetrySink]:
+    return _clickhouse_sink
+
+
 def _initialize_telemetry_logger():
-    global telemetry_logger
+    global telemetry_logger, _clickhouse_sink
     if not _is_telemetry_enabled():
         telemetry_logger.setLevel(logging.CRITICAL + 1)
         return
-    telemetry_handler = logging.StreamHandler()
-    telemetry_handler.setLevel(logging.INFO)
-    telemetry_handler.setFormatter(
-        jsonlogger.JsonFormatter(fmt="%(asctime)s %(name)s %(levelname)s %(message)s")
-    )
-    telemetry_logger.handlers.clear()
-    telemetry_logger.addHandler(telemetry_handler)
-    telemetry_logger.setLevel(logging.INFO)
+
+    _clickhouse_sink = ClickHouseTelemetrySink()
+
+    if not _clickhouse_sink.enabled:
+        telemetry_handler = logging.StreamHandler()
+        telemetry_handler.setLevel(logging.INFO)
+        telemetry_handler.setFormatter(
+            jsonlogger.JsonFormatter(fmt="%(asctime)s %(name)s %(levelname)s %(message)s")
+        )
+        telemetry_logger.handlers.clear()
+        telemetry_logger.addHandler(telemetry_handler)
+        telemetry_logger.setLevel(logging.INFO)
+    else:
+        telemetry_logger.setLevel(logging.CRITICAL + 1)
 
 
 # Default initialization

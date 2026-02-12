@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from collections import OrderedDict
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -10,7 +10,7 @@ import flytekit
 from flytekit import FlyteContextManager, task
 from flytekit.configuration import ImageConfig, SerializationSettings
 from flytekit.core.utils import ClassDecorator, _dnsify, timeit, str2bool
-from flytekit.loggers import telemetry_logger
+from flytekit.loggers import ClickHouseTelemetrySink, get_clickhouse_sink, telemetry_logger
 from flytekit.tools.translator import get_serializable_task
 from tests.flytekit.unit.test_translator import default_img
 
@@ -121,7 +121,7 @@ def test_str_2_bool():
     assert str2bool("1")
 
 
-def test_timeit_telemetry_success():
+def test_timeit_telemetry_success_fallback_to_logger():
     with patch.object(telemetry_logger, "info") as mock_info:
         with timeit("test_step"):
             pass
@@ -140,7 +140,7 @@ def test_timeit_telemetry_success():
     assert "error_type" not in extra
 
 
-def test_timeit_telemetry_error():
+def test_timeit_telemetry_error_fallback_to_logger():
     with patch.object(telemetry_logger, "info") as mock_info:
         with pytest.raises(ValueError):
             with timeit("failing_step"):
@@ -252,3 +252,144 @@ def test_timeit_all_steps_in_task_execution():
     assert "pre_execute" in step_names
     assert "Execute user level code" in step_names
     assert "post_execute" in step_names
+
+
+def test_clickhouse_sink_disabled_without_url():
+    sink = ClickHouseTelemetrySink()
+    assert not sink.enabled
+
+
+def test_clickhouse_sink_enabled_with_url():
+    orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
+    try:
+        os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
+        sink = ClickHouseTelemetrySink()
+        assert sink.enabled
+    finally:
+        if orig is not None:
+            os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig
+        else:
+            os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_URL", None)
+
+
+def test_clickhouse_sink_send_noop_when_disabled():
+    sink = ClickHouseTelemetrySink()
+    sink.send({"event": "test"})
+    assert len(sink._buffer) == 0
+
+
+def test_clickhouse_sink_buffers_events():
+    orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
+    try:
+        os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
+        sink = ClickHouseTelemetrySink()
+        sink.send({"event": "flytekit_step", "step": "test1"})
+        sink.send({"event": "flytekit_step", "step": "test2"})
+        assert len(sink._buffer) == 2
+        assert sink._buffer[0]["step"] == "test1"
+        assert sink._buffer[1]["step"] == "test2"
+        assert "timestamp" in sink._buffer[0]
+    finally:
+        if orig is not None:
+            os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig
+        else:
+            os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_URL", None)
+
+
+def test_clickhouse_sink_flush_clears_buffer():
+    orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
+    try:
+        os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
+        sink = ClickHouseTelemetrySink()
+        sink.send({"event": "flytekit_step", "step": "test1"})
+        assert len(sink._buffer) == 1
+        with patch.object(sink, "_do_flush"):
+            sink.flush()
+        assert len(sink._buffer) == 0
+    finally:
+        if orig is not None:
+            os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig
+        else:
+            os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_URL", None)
+
+
+def test_clickhouse_sink_do_flush_posts_json():
+    orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
+    try:
+        os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
+        os.environ["FLYTE_TELEMETRY_CLICKHOUSE_USER"] = "testuser"
+        os.environ["FLYTE_TELEMETRY_CLICKHOUSE_PASSWORD"] = "testpass"
+        sink = ClickHouseTelemetrySink()
+
+        events = [
+            {"event": "flytekit_step", "step": "s1", "wall_time_s": 0.1},
+            {"event": "flytekit_step", "step": "s2", "wall_time_s": 0.2},
+        ]
+
+        with patch("flytekit.loggers.urllib.request.urlopen") as mock_urlopen:
+            sink._do_flush(events)
+
+        mock_urlopen.assert_called_once()
+        req = mock_urlopen.call_args[0][0]
+        from urllib.parse import unquote
+        decoded_url = unquote(req.full_url)
+        assert "INSERT INTO" in decoded_url
+        assert "FORMAT JSONEachRow" in decoded_url
+        body = req.data.decode("utf-8")
+        lines = body.strip().split("\n")
+        assert len(lines) == 2
+        assert json.loads(lines[0])["step"] == "s1"
+        assert json.loads(lines[1])["step"] == "s2"
+    finally:
+        if orig is not None:
+            os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig
+        else:
+            os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_URL", None)
+        os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_USER", None)
+        os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_PASSWORD", None)
+
+
+def test_timeit_routes_to_clickhouse_sink():
+    mock_sink = MagicMock()
+    mock_sink.enabled = True
+    with patch("flytekit.core.utils.get_clickhouse_sink", return_value=mock_sink):
+        with timeit("ch_step"):
+            pass
+
+    mock_sink.send.assert_called_once()
+    event = mock_sink.send.call_args[0][0]
+    assert event["step"] == "ch_step"
+    assert event["status"] == "success"
+    assert "wall_time_s" in event
+
+
+def test_timeit_routes_to_clickhouse_on_error():
+    mock_sink = MagicMock()
+    mock_sink.enabled = True
+    with patch("flytekit.core.utils.get_clickhouse_sink", return_value=mock_sink):
+        with pytest.raises(RuntimeError):
+            with timeit("ch_error_step"):
+                raise RuntimeError("boom")
+
+    event = mock_sink.send.call_args[0][0]
+    assert event["status"] == "error"
+    assert event["error_type"] == "RuntimeError"
+
+
+def test_clickhouse_sink_do_flush_silences_errors():
+    orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
+    try:
+        os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
+        sink = ClickHouseTelemetrySink()
+        with patch("flytekit.loggers.urllib.request.urlopen", side_effect=Exception("network down")):
+            sink._do_flush([{"event": "test"}])
+    finally:
+        if orig is not None:
+            os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig
+        else:
+            os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_URL", None)
+
+
+def test_default_clickhouse_sink_is_disabled():
+    sink = get_clickhouse_sink()
+    assert sink is None or not sink.enabled

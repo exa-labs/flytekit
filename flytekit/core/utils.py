@@ -16,7 +16,7 @@ from flyteidl.core import tasks_pb2 as _core_task
 
 from flytekit.configuration import SerializationSettings
 from flytekit.core.pod_template import PodTemplate
-from flytekit.loggers import logger, telemetry_logger
+from flytekit.loggers import get_clickhouse_sink, logger, telemetry_logger
 
 if TYPE_CHECKING:
     from flytekit.models import task as task_models
@@ -379,7 +379,11 @@ class timeit:
             if self._extras:
                 telemetry_data.update(self._extras)
 
-            telemetry_logger.info("flytekit_step", extra=telemetry_data)
+            sink = get_clickhouse_sink()
+            if sink is not None and sink.enabled:
+                sink.send(telemetry_data)
+            else:
+                telemetry_logger.info("flytekit_step", extra=telemetry_data)
         except Exception:
             pass
 
