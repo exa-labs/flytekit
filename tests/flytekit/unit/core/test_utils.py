@@ -274,21 +274,22 @@ def test_clickhouse_sink_enabled_with_url():
 
 def test_clickhouse_sink_send_noop_when_disabled():
     sink = ClickHouseTelemetrySink()
-    sink.send({"event": "test"})
-    assert len(sink._buffer) == 0
+    with patch("flytekit.loggers.threading.Thread") as mock_thread:
+        sink.send({"event": "test"})
+    mock_thread.assert_not_called()
 
 
-def test_clickhouse_sink_buffers_events():
+def test_clickhouse_sink_send_fires_background_thread():
     orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
     try:
         os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
         sink = ClickHouseTelemetrySink()
-        sink.send({"event": "flytekit_step", "step": "test1"})
-        sink.send({"event": "flytekit_step", "step": "test2"})
-        assert len(sink._buffer) == 2
-        assert sink._buffer[0]["step"] == "test1"
-        assert sink._buffer[1]["step"] == "test2"
-        assert "timestamp" in sink._buffer[0]
+        with patch("flytekit.loggers.threading.Thread") as mock_thread:
+            sink.send({"event": "flytekit_step", "step": "test1"})
+        mock_thread.assert_called_once()
+        call_kwargs = mock_thread.call_args[1]
+        assert call_kwargs["target"] == sink._post_row
+        assert call_kwargs["daemon"] is True
     finally:
         if orig is not None:
             os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig
@@ -296,24 +297,7 @@ def test_clickhouse_sink_buffers_events():
             os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_URL", None)
 
 
-def test_clickhouse_sink_flush_clears_buffer():
-    orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
-    try:
-        os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
-        sink = ClickHouseTelemetrySink()
-        sink.send({"event": "flytekit_step", "step": "test1"})
-        assert len(sink._buffer) == 1
-        with patch.object(sink, "_do_flush"):
-            sink.flush()
-        assert len(sink._buffer) == 0
-    finally:
-        if orig is not None:
-            os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig
-        else:
-            os.environ.pop("FLYTE_TELEMETRY_CLICKHOUSE_URL", None)
-
-
-def test_clickhouse_sink_do_flush_posts_json():
+def test_clickhouse_sink_post_row_sends_json():
     orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
     try:
         os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
@@ -321,13 +305,10 @@ def test_clickhouse_sink_do_flush_posts_json():
         os.environ["FLYTE_TELEMETRY_CLICKHOUSE_PASSWORD"] = "testpass"
         sink = ClickHouseTelemetrySink()
 
-        events = [
-            {"event": "flytekit_step", "step": "s1", "wall_time_s": 0.1},
-            {"event": "flytekit_step", "step": "s2", "wall_time_s": 0.2},
-        ]
+        event = {"event": "flytekit_step", "step": "s1", "wall_time_s": 0.1}
 
         with patch("flytekit.loggers.urllib.request.urlopen") as mock_urlopen:
-            sink._do_flush(events)
+            sink._post_row(event)
 
         mock_urlopen.assert_called_once()
         req = mock_urlopen.call_args[0][0]
@@ -335,11 +316,8 @@ def test_clickhouse_sink_do_flush_posts_json():
         decoded_url = unquote(req.full_url)
         assert "INSERT INTO" in decoded_url
         assert "FORMAT JSONEachRow" in decoded_url
-        body = req.data.decode("utf-8")
-        lines = body.strip().split("\n")
-        assert len(lines) == 2
-        assert json.loads(lines[0])["step"] == "s1"
-        assert json.loads(lines[1])["step"] == "s2"
+        parsed = json.loads(req.data.decode("utf-8"))
+        assert parsed["step"] == "s1"
     finally:
         if orig is not None:
             os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig
@@ -376,13 +354,13 @@ def test_timeit_routes_to_clickhouse_on_error():
     assert event["error_type"] == "RuntimeError"
 
 
-def test_clickhouse_sink_do_flush_silences_errors():
+def test_clickhouse_sink_post_row_silences_errors():
     orig = os.environ.get("FLYTE_TELEMETRY_CLICKHOUSE_URL")
     try:
         os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = "https://ch.example.com:8443"
         sink = ClickHouseTelemetrySink()
         with patch("flytekit.loggers.urllib.request.urlopen", side_effect=Exception("network down")):
-            sink._do_flush([{"event": "test"}])
+            sink._post_row({"event": "test"})
     finally:
         if orig is not None:
             os.environ["FLYTE_TELEMETRY_CLICKHOUSE_URL"] = orig

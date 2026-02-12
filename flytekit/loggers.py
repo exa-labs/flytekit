@@ -1,4 +1,3 @@
-import atexit
 import json
 import logging
 import os
@@ -212,21 +211,12 @@ def is_display_progress_enabled() -> bool:
 
 
 class ClickHouseTelemetrySink:
-    """Buffers telemetry events and flushes to ClickHouse via HTTP in a background thread.
+    """Inserts each telemetry event as a single row to ClickHouse via HTTP POST.
 
-    Uses ClickHouse's HTTP interface with FORMAT JSONEachRow for zero-dependency inserts.
-    Events are buffered in memory and flushed when the buffer reaches FLUSH_THRESHOLD or
-    at process exit via atexit. All network I/O happens off the critical path.
-
-    Env vars:
-        FLYTE_TELEMETRY_CLICKHOUSE_URL      — e.g. https://host:8443
-        FLYTE_TELEMETRY_CLICKHOUSE_USER      — ClickHouse username
-        FLYTE_TELEMETRY_CLICKHOUSE_PASSWORD  — ClickHouse password
-        FLYTE_TELEMETRY_CLICKHOUSE_DATABASE  — database (default: "default")
-        FLYTE_TELEMETRY_CLICKHOUSE_TABLE     — table  (default: "flytekit_telemetry")
+    Each call to send() fires a background thread that POSTs one JSONEachRow line
+    to ClickHouse's HTTP interface. No buffering, no batching — every step is
+    immediately visible in ClickHouse.
     """
-
-    FLUSH_THRESHOLD = 50
 
     def __init__(self):
         self._url = os.environ.get(CLICKHOUSE_URL_ENV_VAR, "")
@@ -234,41 +224,22 @@ class ClickHouseTelemetrySink:
         self._password = os.environ.get(CLICKHOUSE_PASSWORD_ENV_VAR, "")
         self._database = os.environ.get(CLICKHOUSE_DATABASE_ENV_VAR, "default")
         self._table = os.environ.get(CLICKHOUSE_TABLE_ENV_VAR, "flytekit_telemetry")
-        self._buffer: typing.List[typing.Dict[str, typing.Any]] = []
-        self._lock = threading.Lock()
         self._enabled = bool(self._url)
-        if self._enabled:
-            atexit.register(self.flush)
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
     def send(self, event: typing.Dict[str, typing.Any]):
-        """Buffer a telemetry event. Triggers a background flush when threshold is reached."""
+        """Insert a single telemetry row in a background thread."""
         if not self._enabled:
             return
         event["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        to_flush = None
-        with self._lock:
-            self._buffer.append(event)
-            if len(self._buffer) >= self.FLUSH_THRESHOLD:
-                to_flush = self._buffer[:]
-                self._buffer.clear()
-        if to_flush is not None:
-            threading.Thread(target=self._do_flush, args=(to_flush,), daemon=True).start()
+        threading.Thread(target=self._post_row, args=(event,), daemon=True).start()
 
-    def flush(self):
-        """Flush all buffered events. Called at exit and can be called manually."""
-        with self._lock:
-            to_flush = self._buffer[:]
-            self._buffer.clear()
-        if to_flush:
-            self._do_flush(to_flush)
-
-    def _do_flush(self, events: typing.List[typing.Dict[str, typing.Any]]):
+    def _post_row(self, event: typing.Dict[str, typing.Any]):
         try:
-            body = "\n".join(json.dumps(e) for e in events).encode("utf-8")
+            body = json.dumps(event).encode("utf-8")
             query = f"INSERT INTO {self._database}.{self._table} FORMAT JSONEachRow"
             url = f"{self._url}/?query={urllib.request.quote(query)}"
             credentials = b64encode(f"{self._user}:{self._password}".encode()).decode()
