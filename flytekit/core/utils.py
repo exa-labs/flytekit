@@ -353,32 +353,35 @@ class timeit:
         process_time: float,
         exc_type: Optional[type],
     ):
-        telemetry_data: Dict[str, Any] = {
-            "event": "flytekit_step",
-            "step": self._name,
-            "wall_time_s": round(wall_time, 6),
-            "process_time_s": round(process_time, 6),
-            "status": "error" if exc_type is not None else "success",
-        }
-        if exc_type is not None:
-            telemetry_data["error_type"] = exc_type.__name__
-
         try:
-            ctx = ctx_manager.current_context()
-            params = ctx.user_space_params
-            if params.execution_id is not None:
-                telemetry_data["execution_id"] = str(params.execution_id)
-            if params.task_id is not None:
-                telemetry_data["task_name"] = params.task_id.name
-                telemetry_data["project"] = params.task_id.project
-                telemetry_data["domain"] = params.task_id.domain
+            telemetry_data: Dict[str, Any] = {
+                "event": "flytekit_step",
+                "step": self._name,
+                "wall_time_s": round(wall_time, 6),
+                "process_time_s": round(process_time, 6),
+                "status": "error" if exc_type is not None else "success",
+            }
+            if exc_type is not None:
+                telemetry_data["error_type"] = exc_type.__name__
+
+            try:
+                ctx = ctx_manager.current_context()
+                params = ctx.user_space_params
+                if params.execution_id is not None:
+                    telemetry_data["execution_id"] = str(params.execution_id)
+                if params.task_id is not None:
+                    telemetry_data["task_name"] = params.task_id.name
+                    telemetry_data["project"] = params.task_id.project
+                    telemetry_data["domain"] = params.task_id.domain
+            except Exception:
+                pass
+
+            if self._extras:
+                telemetry_data.update(self._extras)
+
+            telemetry_logger.info("flytekit_step", extra=telemetry_data)
         except Exception:
             pass
-
-        if self._extras:
-            telemetry_data.update(self._extras)
-
-        telemetry_logger.info("flytekit_step", extra=telemetry_data)
 
 
 class ClassDecorator(ABC):
