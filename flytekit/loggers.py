@@ -18,14 +18,18 @@ LOGGING_DEV_ENV_VAR = "FLYTE_SDK_DEV_LOGGING_LEVEL"
 LOGGING_FMT_ENV_VAR = "FLYTE_SDK_LOGGING_FORMAT"
 LOGGING_RICH_FMT_ENV_VAR = "FLYTE_SDK_RICH_TRACEBACKS"
 
+LOGGING_TELEMETRY_ENV_VAR = "FLYTE_TELEMETRY_ENABLED"
+
 # By default, the root flytekit logger to debug so everything is logged, but enable fine-tuning
 logger = logging.getLogger("flytekit")
 user_space_logger = logging.getLogger("user_space")
 developer_logger = logging.getLogger("developer")
+telemetry_logger = logging.getLogger("flytekit.telemetry")
 
 # Stop propagation so that configuration is isolated to this file (so that it doesn't matter what the
 # global Python root logger is set to).
 logger.propagate = False
+telemetry_logger.propagate = False
 
 
 def set_flytekit_log_properties(
@@ -111,10 +115,16 @@ def _get_dev_env_logging_level(default_level: int = logging.INFO) -> int:
     return int(os.getenv(LOGGING_DEV_ENV_VAR, default_level))
 
 
+def _is_telemetry_enabled() -> bool:
+    return os.environ.get(LOGGING_TELEMETRY_ENV_VAR, "1").lower() in ("1", "true", "t")
+
+
 def initialize_global_loggers():
     """
     Initializes the global loggers to the default configuration.
     """
+    _initialize_telemetry_logger()
+
     # Use Rich logging while running in the local execution or jupyter notebook.
     if (os.getenv("FLYTE_INTERNAL_EXECUTION_ID") is None or interactive.ipython_check()) and is_rich_logging_enabled():
         try:
@@ -188,6 +198,21 @@ def get_level_from_cli_verbosity(verbosity: int) -> int:
 
 def is_display_progress_enabled() -> bool:
     return os.getenv(LOGGING_RICH_FMT_ENV_VAR, False)
+
+
+def _initialize_telemetry_logger():
+    global telemetry_logger
+    if not _is_telemetry_enabled():
+        telemetry_logger.setLevel(logging.CRITICAL + 1)
+        return
+    telemetry_handler = logging.StreamHandler()
+    telemetry_handler.setLevel(logging.INFO)
+    telemetry_handler.setFormatter(
+        jsonlogger.JsonFormatter(fmt="%(asctime)s %(name)s %(levelname)s %(message)s")
+    )
+    telemetry_logger.handlers.clear()
+    telemetry_logger.addHandler(telemetry_handler)
+    telemetry_logger.setLevel(logging.INFO)
 
 
 # Default initialization

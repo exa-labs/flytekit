@@ -16,7 +16,7 @@ from flyteidl.core import tasks_pb2 as _core_task
 
 from flytekit.configuration import SerializationSettings
 from flytekit.core.pod_template import PodTemplate
-from flytekit.loggers import logger
+from flytekit.loggers import logger, telemetry_logger
 
 if TYPE_CHECKING:
     from flytekit.models import task as task_models
@@ -296,11 +296,13 @@ class timeit:
         # your code
     """
 
-    def __init__(self, name: str = ""):
+    def __init__(self, name: str = "", **extras: Any):
         """
         :param name: A string that describes the wrapped code block or function being executed.
+        :param extras: Additional key-value pairs to include in the telemetry log.
         """
         self._name = name
+        self._extras = extras
         self.start_time = None
         self._start_wall_time = None
         self._start_process_time = None
@@ -320,15 +322,14 @@ class timeit:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """
-        The exception, if any, will propagate outside the context manager, as the purpose of this context manager
-        is solely to measure the execution time of the wrapped code block.
-        """
         from flytekit.core.context_manager import FlyteContextManager
 
         end_time = datetime.datetime.now(datetime.timezone.utc)
         end_wall_time = time.perf_counter()
         end_process_time = time.process_time()
+
+        wall_time = end_wall_time - self._start_wall_time
+        process_time = end_process_time - self._start_process_time
 
         timeline_deck = FlyteContextManager.current_context().user_space_params.timeline_deck
         timeline_deck.append_time_info(
@@ -336,12 +337,48 @@ class timeit:
                 Name=self._name,
                 Start=self.start_time,
                 Finish=end_time,
-                WallTime=end_wall_time - self._start_wall_time,
-                ProcessTime=end_process_time - self._start_process_time,
+                WallTime=wall_time,
+                ProcessTime=process_time,
             )
         )
 
-        logger.info(f"{self._name}. [Time: {end_wall_time - self._start_wall_time:.6f}s]")
+        logger.info(f"{self._name}. [Time: {wall_time:.6f}s]")
+
+        self._emit_telemetry(FlyteContextManager, wall_time, process_time, exc_type)
+
+    def _emit_telemetry(
+        self,
+        ctx_manager: Any,
+        wall_time: float,
+        process_time: float,
+        exc_type: Optional[type],
+    ):
+        telemetry_data: Dict[str, Any] = {
+            "event": "flytekit_step",
+            "step": self._name,
+            "wall_time_s": round(wall_time, 6),
+            "process_time_s": round(process_time, 6),
+            "status": "error" if exc_type is not None else "success",
+        }
+        if exc_type is not None:
+            telemetry_data["error_type"] = exc_type.__name__
+
+        try:
+            ctx = ctx_manager.current_context()
+            params = ctx.user_space_params
+            if params.execution_id is not None:
+                telemetry_data["execution_id"] = str(params.execution_id)
+            if params.task_id is not None:
+                telemetry_data["task_name"] = params.task_id.name
+                telemetry_data["project"] = params.task_id.project
+                telemetry_data["domain"] = params.task_id.domain
+        except Exception:
+            pass
+
+        if self._extras:
+            telemetry_data.update(self._extras)
+
+        telemetry_logger.info("flytekit_step", extra=telemetry_data)
 
 
 class ClassDecorator(ABC):

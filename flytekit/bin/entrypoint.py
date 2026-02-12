@@ -40,7 +40,7 @@ from flytekit.core.context_manager import (
 )
 from flytekit.core.data_persistence import FileAccessProvider
 from flytekit.core.promise import VoidPromise
-from flytekit.core.utils import str2bool
+from flytekit.core.utils import str2bool, timeit
 from flytekit.deck.deck import _output_deck
 from flytekit.exceptions.base import FlyteException
 from flytekit.exceptions.system import FlyteNonRecoverableSystemException
@@ -160,79 +160,74 @@ def _dispatch_execute(
     task_def = None
     try:
         try:
-            task_def = load_task()
+            with timeit("load_task"):
+                task_def = load_task()
         except Exception as e:
-            # If the task can not be loaded, then it's most likely a user error. For example,
-            # a dependency is not installed during execution.
             raise FlyteUserRuntimeException(e) from e
 
         logger.debug(f"Starting _dispatch_execute for {task_def.name}")
         # Step1
         local_inputs_file = os.path.join(ctx.execution_state.working_dir, "inputs.pb")
-        ctx.file_access.get_data(inputs_path, local_inputs_file)
-        input_proto = utils.load_proto_from_file(_literals_pb2.LiteralMap, local_inputs_file)
-        idl_input_literals = _literal_models.LiteralMap.from_flyte_idl(input_proto)
+        with timeit("download_inputs"):
+            ctx.file_access.get_data(inputs_path, local_inputs_file)
+        with timeit("deserialize_inputs"):
+            input_proto = utils.load_proto_from_file(_literals_pb2.LiteralMap, local_inputs_file)
+            idl_input_literals = _literal_models.LiteralMap.from_flyte_idl(input_proto)
 
         # Step2
-        # Invoke task - dispatch_execute
-        outputs = task_def.dispatch_execute(ctx, idl_input_literals)
+        with timeit("task_dispatch_execute"):
+            outputs = task_def.dispatch_execute(ctx, idl_input_literals)
 
         # Step3a
         if isinstance(outputs, VoidPromise):
             logger.warning("Task produces no outputs")
             output_file_dict = {_constants.OUTPUT_FILE_NAME: _literal_models.LiteralMap(literals={})}
         elif isinstance(outputs, _literal_models.LiteralMap):
-            # The keys in this map hold the filenames to the offloaded proto literals.
-            offloaded_literals: Dict[str, _literal_models.Literal] = {}
-            literal_map_copy = {}
+            with timeit("output_offloading"):
+                # The keys in this map hold the filenames to the offloaded proto literals.
+                offloaded_literals: Dict[str, _literal_models.Literal] = {}
+                literal_map_copy = {}
 
-            offloading_enabled = os.environ.get("_F_L_MIN_SIZE_MB", None) is not None
-            min_offloaded_size = -1
-            max_offloaded_size = -1
-            if offloading_enabled:
-                min_offloaded_size = int(os.environ.get("_F_L_MIN_SIZE_MB", "10")) * 1024 * 1024
-                max_offloaded_size = int(os.environ.get("_F_L_MAX_SIZE_MB", "1000")) * 1024 * 1024
+                offloading_enabled = os.environ.get("_F_L_MIN_SIZE_MB", None) is not None
+                min_offloaded_size = -1
+                max_offloaded_size = -1
+                if offloading_enabled:
+                    min_offloaded_size = int(os.environ.get("_F_L_MIN_SIZE_MB", "10")) * 1024 * 1024
+                    max_offloaded_size = int(os.environ.get("_F_L_MAX_SIZE_MB", "1000")) * 1024 * 1024
 
-            # Go over each output and create a separate offloaded in case its size is too large
-            for k, v in outputs.literals.items():
-                literal_map_copy[k] = v
+                # Go over each output and create a separate offloaded in case its size is too large
+                for k, v in outputs.literals.items():
+                    literal_map_copy[k] = v
 
-                if not offloading_enabled:
-                    continue
+                    if not offloading_enabled:
+                        continue
 
-                lit = v.to_flyte_idl()
-                if max_offloaded_size != -1 and lit.ByteSize() >= max_offloaded_size:
-                    raise ValueError(
-                        f"Literal {k} is too large to be offloaded. Max literal size is {max_offloaded_size} whereas the literal size is {lit.ByteSize()} bytes"
-                    )
+                    lit = v.to_flyte_idl()
+                    if max_offloaded_size != -1 and lit.ByteSize() >= max_offloaded_size:
+                        raise ValueError(
+                            f"Literal {k} is too large to be offloaded. Max literal size is {max_offloaded_size} whereas the literal size is {lit.ByteSize()} bytes"
+                        )
 
-                if min_offloaded_size != -1 and lit.ByteSize() >= min_offloaded_size:
-                    logger.debug(f"Literal {k} is too large to be inlined, offloading to metadata bucket")
-                    inferred_type = task_def.interface.outputs[k].type
+                    if min_offloaded_size != -1 and lit.ByteSize() >= min_offloaded_size:
+                        logger.debug(f"Literal {k} is too large to be inlined, offloading to metadata bucket")
+                        inferred_type = task_def.interface.outputs[k].type
 
-                    # In the case of map tasks we need to use the type of the collection as inferred type as the task
-                    # typed interface of the offloaded literal. This is done because the map task interface present in
-                    # the task template contains the (correct) type for the entire map task, not the single node execution.
-                    # For that reason we "unwrap" the collection type and use it as the inferred type of the offloaded literal.
-                    if is_map_task:
-                        inferred_type = inferred_type.collection_type
+                        if is_map_task:
+                            inferred_type = inferred_type.collection_type
 
-                    # This file will hold the offloaded literal and will be written to the output prefix
-                    # alongside the regular outputs.pb, deck.pb, etc.
-                    # N.B.: by construction `offloaded_filename` is guaranteed to be unique
-                    offloaded_filename = f"{k}_offloaded_metadata.pb"
-                    offloaded_literal = _literal_models.Literal(
-                        offloaded_metadata=_literal_models.LiteralOffloadedMetadata(
-                            uri=f"{output_prefix}/{offloaded_filename}",
-                            size_bytes=lit.ByteSize(),
-                            # TODO: remove after https://github.com/flyteorg/flyte/pull/5909 is merged
-                            inferred_type=inferred_type,
-                        ),
-                        hash=v.hash if v.hash is not None else compute_hash_string(lit),
-                    )
-                    literal_map_copy[k] = offloaded_literal
-                    offloaded_literals[offloaded_filename] = v
-            outputs = _literal_models.LiteralMap(literals=literal_map_copy)
+                        offloaded_filename = f"{k}_offloaded_metadata.pb"
+                        offloaded_literal = _literal_models.Literal(
+                            offloaded_metadata=_literal_models.LiteralOffloadedMetadata(
+                                uri=f"{output_prefix}/{offloaded_filename}",
+                                size_bytes=lit.ByteSize(),
+                                # TODO: remove after https://github.com/flyteorg/flyte/pull/5909 is merged
+                                inferred_type=inferred_type,
+                            ),
+                            hash=v.hash if v.hash is not None else compute_hash_string(lit),
+                        )
+                        literal_map_copy[k] = offloaded_literal
+                        offloaded_literals[offloaded_filename] = v
+                outputs = _literal_models.LiteralMap(literals=literal_map_copy)
 
             output_file_dict = {_constants.OUTPUT_FILE_NAME: outputs, **offloaded_literals}
         elif isinstance(outputs, _dynamic_job.DynamicJobSpec):
@@ -320,11 +315,13 @@ def _dispatch_execute(
     for k, v in output_file_dict.items():
         utils.write_proto_to_file(v.to_flyte_idl(), os.path.join(ctx.execution_state.engine_dir, k))
 
-    ctx.file_access.put_data(ctx.execution_state.engine_dir, output_prefix, is_multipart=True)
+    with timeit("upload_outputs"):
+        ctx.file_access.put_data(ctx.execution_state.engine_dir, output_prefix, is_multipart=True)
     logger.info(f"Engine folder written successfully to the output prefix {output_prefix}")
 
     if task_def is not None and not getattr(task_def, "disable_deck", True):
-        _output_deck(task_name=task_def.name.split(".")[-1], new_user_params=ctx.user_space_params)
+        with timeit("output_deck"):
+            _output_deck(task_name=task_def.name.split(".")[-1], new_user_params=ctx.user_space_params)
 
     logger.debug("Finished _dispatch_execute")
 
