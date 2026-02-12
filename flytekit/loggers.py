@@ -268,6 +268,7 @@ def _initialize_telemetry_logger():
     global telemetry_logger, _clickhouse_sink
     if not _is_telemetry_enabled():
         telemetry_logger.setLevel(logging.CRITICAL + 1)
+        _clickhouse_sink = None
         return
 
     _clickhouse_sink = ClickHouseTelemetrySink()
