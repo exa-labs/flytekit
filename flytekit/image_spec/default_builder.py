@@ -876,5 +876,10 @@ class DefaultImageBuilder(ImageSpecBuilder):
                 if arg == "--dest-creds" and i + 1 < len(log_command):
                     log_command[i + 1] = "[REDACTED]"
             click.secho(f"Run command: {' '.join(log_command)} ", fg="blue")
-            run(command, check=True)
+            result = run(command)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Build command failed with exit code {result.returncode}: "
+                    f"{' '.join(log_command)}"
+                )
             return image_spec.image_name()
