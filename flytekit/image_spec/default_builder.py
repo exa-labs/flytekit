@@ -904,12 +904,15 @@ class DefaultImageBuilder(ImageSpecBuilder):
         return any(pattern in lower for pattern in cls._DEPOT_AUTH_ERROR_PATTERNS)
 
     @staticmethod
-    def _depot_auth_preflight() -> bool:
-        """Quick check whether depot credentials are valid. Returns True if ok."""
+    def _depot_auth_preflight() -> bool | None:
+        """Quick check whether depot credentials are valid.
+
+        Returns True if auth ok, False if auth failed, None if depot not installed.
+        """
         import shutil
 
         if not shutil.which("depot"):
-            return False
+            return None
         try:
             result = run(
                 ["depot", "projects", "list"],
@@ -935,18 +938,20 @@ class DefaultImageBuilder(ImageSpecBuilder):
 
         use_depot = self._resolve_use_depot(image_spec)
 
-        if use_depot and not self._depot_auth_preflight():
-            import shutil as _shutil
+        if use_depot:
+            preflight = self._depot_auth_preflight()
+            if preflight is False:
+                import shutil as _shutil
 
-            if _shutil.which("docker"):
-                docker_check = run(["docker", "info"], capture_output=True, text=True)
-                if docker_check.returncode == 0:
-                    click.secho(
-                        "Depot auth failed (invalid/expired token), falling back to docker. "
-                        "Set FLYTEKIT_USE_DEPOT=false to skip this check.",
-                        fg="yellow",
-                    )
-                    use_depot = False
+                if _shutil.which("docker"):
+                    docker_check = run(["docker", "info"], capture_output=True, text=True)
+                    if docker_check.returncode == 0:
+                        click.secho(
+                            "Depot auth failed (invalid/expired token), falling back to docker. "
+                            "Set FLYTEKIT_USE_DEPOT=false to skip this check.",
+                            fg="yellow",
+                        )
+                        use_depot = False
 
         self._validate_build_tool(use_depot)
 
