@@ -248,7 +248,7 @@ class ImageSpec:
             If the option is set by the user, then that option is of course used.
         copy: List of files/directories to copy to /root. e.g. ["src/file1.txt", "src/file2.txt"]
         python_exec: Python executable to use for install packages
-        use_depot: Whether to use depot to build the image. If True, the image will be built using depot. If False, the image will be built using docker.
+        use_depot: Whether to use depot to build the image. If True, the image will be built using depot. If False, the image will be built using docker. Defaults to False (docker).
         uv_export_args: Extra arguments to pass to uv export.
         vendor_local: Whether to vendor the local project into the image.
         nix: Whether to use nix to build the image. If True, the image will be built using nix. If False, the image will be built using docker.
@@ -280,7 +280,7 @@ class ImageSpec:
     copy: Optional[List[str]] = None
     python_exec: Optional[str] = None
     install_project: Optional[bool] = False
-    use_depot: Optional[bool] = True
+    use_depot: Optional[bool] = False
     uv_export_args: str = ""
     vendor_local: Optional[bool] = True
     nix: Optional[bool] = False

@@ -79,7 +79,6 @@ class TestBuildErrorHandling:
         # Verify
         assert "Docker is not installed or not in PATH" in str(exc_info.value)
         assert "https://docs.docker.com/get-docker/" in str(exc_info.value)
-        assert "use_depot=True" in str(exc_info.value)
     
     @patch('shutil.which')
     @patch('flytekit.image_spec.default_builder.run')
@@ -103,7 +102,6 @@ class TestBuildErrorHandling:
         
         # Verify
         assert "Docker daemon is not running" in str(exc_info.value)
-        assert "use_depot=True" in str(exc_info.value)
     
     @patch('shutil.which')
     def test_depot_not_installed(self, mock_which):
