@@ -871,7 +871,10 @@ class DefaultImageBuilder(ImageSpecBuilder):
                     command.append("--push")
                 command.append(tmp_dir)
 
-            concat_command = " ".join(command)
-            click.secho(f"Run command: {concat_command} ", fg="blue")
+            log_command = list(command)
+            for i, arg in enumerate(log_command):
+                if arg == "--dest-creds" and i + 1 < len(log_command):
+                    log_command[i + 1] = "[REDACTED]"
+            click.secho(f"Run command: {' '.join(log_command)} ", fg="blue")
             run(command, check=True)
             return image_spec.image_name()
