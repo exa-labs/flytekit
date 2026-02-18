@@ -157,6 +157,18 @@ RUN mkdir -p $$HOME && \
     echo "export PATH=$$PATH" >> $$HOME/.profile
 """)
 
+NIX_INSTALL_SCRIPT = """\
+curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+    sh -s -- install linux \
+    --determinate \
+    --extra-conf "sandbox = true" \
+    --extra-conf "max-substitution-jobs = 256" \
+    --extra-conf "http-connections = 256" \
+    --extra-conf "download-buffer-size = 1073741824" \
+    --init none \
+    --no-confirm\
+"""
+
 NIX_DOCKER_FILE_TEMPLATE = Template("""\
 # Use Ubuntu as base instead of nixpkgs/nix for better compatibility
 FROM ubuntu:24.04
@@ -175,24 +187,20 @@ RUN apt-get update -y && \
 
 # Install Nix using cache mount so it persists across builds
 RUN --mount=type=cache,target=/nix,id=nix-determinate \
-    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-        sh -s -- install linux \
-        --determinate \
-        --extra-conf "sandbox = true" \
-        --extra-conf "max-substitution-jobs = 256" \
-        --extra-conf "http-connections = 256" \
-        --extra-conf "download-buffer-size = 1073741824" \
-        --init none \
-        --no-confirm
+    $NIX_INSTALL_CMD
 
 # Create a working directory for the build
 WORKDIR /build
 
-# Build with cache mount - reuses the same cache across builds
+# Build with cache mount. Re-installs nix if the cache mount was cleared
+# while the Docker layer cache still considers the install step cached.
 RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
+    if [ ! -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then \
+        $NIX_INSTALL_CMD; \
+    fi && \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
     nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
     --image-parallel-copies 32 \
@@ -774,6 +782,7 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
         docker_content = NIX_DOCKER_FILE_TEMPLATE.substitute(
             IMAGE_NAME=image_spec.image_name(),
             COPY_LOCAL_PACKAGES=copy_local_packages,
+            NIX_INSTALL_CMD=NIX_INSTALL_SCRIPT,
             ECR_TOKEN=subprocess.run(
                 ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
                 capture_output=True,
