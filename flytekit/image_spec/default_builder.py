@@ -910,10 +910,13 @@ class DefaultImageBuilder(ImageSpecBuilder):
 
         if not shutil.which("depot"):
             return False
-        result = run(
-            ["depot", "projects", "list"],
-            capture_output=True, text=True, timeout=15,
-        )
+        try:
+            result = run(
+                ["depot", "projects", "list"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return False
         if result.returncode != 0:
             combined = (result.stdout or "") + (result.stderr or "")
             if DefaultImageBuilder._is_depot_auth_error(combined):
