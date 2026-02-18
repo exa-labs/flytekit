@@ -903,6 +903,23 @@ class DefaultImageBuilder(ImageSpecBuilder):
         lower = error_output.lower()
         return any(pattern in lower for pattern in cls._DEPOT_AUTH_ERROR_PATTERNS)
 
+    @staticmethod
+    def _depot_auth_preflight() -> bool:
+        """Quick check whether depot credentials are valid. Returns True if ok."""
+        import shutil
+
+        if not shutil.which("depot"):
+            return False
+        result = run(
+            ["depot", "projects", "list"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            combined = (result.stdout or "") + (result.stderr or "")
+            if DefaultImageBuilder._is_depot_auth_error(combined):
+                return False
+        return True
+
     def _build_image(self, image_spec: ImageSpec, *, push: bool = True) -> str:
         unsupported_parameters = [
             name
@@ -914,6 +931,20 @@ class DefaultImageBuilder(ImageSpecBuilder):
             warnings.warn(msg, UserWarning, stacklevel=2)
 
         use_depot = self._resolve_use_depot(image_spec)
+
+        if use_depot and not self._depot_auth_preflight():
+            import shutil as _shutil
+
+            if _shutil.which("docker"):
+                docker_check = run(["docker", "info"], capture_output=True, text=True)
+                if docker_check.returncode == 0:
+                    click.secho(
+                        "Depot auth failed (invalid/expired token), falling back to docker. "
+                        "Set FLYTEKIT_USE_DEPOT=false to skip this check.",
+                        fg="yellow",
+                    )
+                    use_depot = False
+
         self._validate_build_tool(use_depot)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -925,33 +956,5 @@ class DefaultImageBuilder(ImageSpecBuilder):
 
             concat_command = " ".join(command)
             click.secho(f"Run command: {concat_command} ", fg="blue")
-
-            result = run(command, capture_output=True, text=True)
-            if result.returncode != 0:
-                combined_output = (result.stdout or "") + (result.stderr or "")
-
-                if use_depot and self._is_depot_auth_error(combined_output):
-                    import shutil as _shutil
-
-                    if _shutil.which("docker"):
-                        click.secho(
-                            f"Depot build failed with auth error, falling back to docker buildx. "
-                            f"Set FLYTEKIT_USE_DEPOT=false to skip depot entirely.",
-                            fg="yellow",
-                        )
-                        docker_result = run(["docker", "info"], capture_output=True, text=True)
-                        if docker_result.returncode == 0:
-                            fallback_command = self._build_command(False, image_spec, push)
-                            fallback_command.append(tmp_dir)
-                            click.secho(f"Fallback command: {' '.join(fallback_command)} ", fg="blue")
-                            run(fallback_command, check=True)
-                            return image_spec.image_name()
-
-                click.secho(f"Build failed:\n{combined_output}", fg="red")
-                raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
-
-            if result.stdout:
-                sys.stdout.write(result.stdout)
-            if result.stderr:
-                sys.stderr.write(result.stderr)
+            run(command, check=True)
             return image_spec.image_name()
