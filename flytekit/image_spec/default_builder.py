@@ -836,9 +836,97 @@ class DefaultImageBuilder(ImageSpecBuilder):
             push=os.getenv("FLYTE_PUSH_IMAGE_SPEC", "True").lower() in ("true", "1"),
         )
 
+    @staticmethod
+    def _resolve_use_depot(image_spec: ImageSpec) -> bool:
+        """Resolve whether to use depot, respecting FLYTEKIT_USE_DEPOT env var override."""
+        env_override = os.getenv("FLYTEKIT_USE_DEPOT")
+        if env_override is not None:
+            return env_override.lower() in ("true", "1")
+        return image_spec.use_depot
+
+    @staticmethod
+    def _build_command(use_depot: bool, image_spec: ImageSpec, push: bool) -> List[str]:
+        """Build the docker/depot command list."""
+        if use_depot:
+            command = [
+                "depot", "build",
+                "--tag", f"{image_spec.image_name()}",
+                "--platform", image_spec.platform,
+            ]
+            if image_spec.nix:
+                command.extend(["--project", "bf5bv9t2mj"])
+        else:
+            command = [
+                "docker", "image", "build",
+                "--tag", f"{image_spec.image_name()}",
+                "--platform", image_spec.platform,
+            ]
+
+        if image_spec.registry and push and not image_spec.nix:
+            command.append("--push")
+        return command
+
+    @staticmethod
+    def _validate_build_tool(use_depot: bool):
+        """Validate that the required build tool is available."""
+        import shutil
+
+        if use_depot:
+            if not shutil.which("depot"):
+                raise RuntimeError(
+                    "Depot is not installed or not in PATH. "
+                    "Install depot or set FLYTEKIT_USE_DEPOT=false to use Docker."
+                )
+        else:
+            if not shutil.which("docker"):
+                raise RuntimeError(
+                    "Docker is not installed or not in PATH. "
+                    "Install Docker or set FLYTEKIT_USE_DEPOT=true to use Depot."
+                )
+            result = run(["docker", "info"], capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Docker daemon is not running or not accessible. Error: {result.stderr}\n"
+                    "Start Docker daemon or set FLYTEKIT_USE_DEPOT=true to use Depot."
+                )
+
+    _DEPOT_AUTH_ERROR_PATTERNS: ClassVar[list] = [
+        "permission_denied",
+        "not authorized",
+        "invalid token",
+        "unauthenticated",
+    ]
+
+    @classmethod
+    def _is_depot_auth_error(cls, error_output: str) -> bool:
+        """Check if a depot build failure is an authentication error."""
+        lower = error_output.lower()
+        return any(pattern in lower for pattern in cls._DEPOT_AUTH_ERROR_PATTERNS)
+
+    @staticmethod
+    def _depot_auth_preflight() -> bool | None:
+        """Quick check whether depot credentials are valid.
+
+        Returns True if auth ok, False if auth failed, None if depot not installed.
+        """
+        import shutil
+
+        if not shutil.which("depot"):
+            return None
+        try:
+            result = run(
+                ["depot", "projects", "list"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        if result.returncode != 0:
+            combined = (result.stdout or "") + (result.stderr or "")
+            if DefaultImageBuilder._is_depot_auth_error(combined):
+                return False
+        return True
+
     def _build_image(self, image_spec: ImageSpec, *, push: bool = True) -> str:
-        # For testing, set `push=False`` to just build the image locally and not push to
-        # registry
         unsupported_parameters = [
             name
             for name, value in vars(image_spec).items()
@@ -848,64 +936,30 @@ class DefaultImageBuilder(ImageSpecBuilder):
             msg = f"The following parameters are unsupported and ignored: {unsupported_parameters}"
             warnings.warn(msg, UserWarning, stacklevel=2)
 
-        # Check if build tools are available
-        import shutil
+        use_depot = self._resolve_use_depot(image_spec)
 
-        if image_spec.use_depot:
-            if not shutil.which("depot"):
-                raise RuntimeError(
-                    "Depot is not installed or not in PATH. "
-                    "Please install depot (https://depot.dev/docs/installation) or use Docker instead by setting use_depot=False"
-                )
-        else:
-            if not shutil.which("docker"):
-                raise RuntimeError(
-                    "Docker is not installed or not in PATH. "
-                    "Please install Docker (https://docs.docker.com/get-docker/) or use depot by setting use_depot=True"
-                )
+        if use_depot:
+            preflight = self._depot_auth_preflight()
+            if preflight is False:
+                import shutil as _shutil
 
-            # Check if Docker daemon is running
-            try:
-                result = run(["docker", "info"], capture_output=True, text=True)
-                if result.returncode != 0:
-                    raise RuntimeError(
-                        f"Docker daemon is not running or not accessible. Error: {result.stderr}\n"
-                        "Please start Docker daemon or use depot by setting use_depot=True"
-                    )
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to check Docker daemon status: {str(e)}\n"
-                    "Please ensure Docker is properly installed and running, or use depot by setting use_depot=True"
-                )
+                if _shutil.which("docker"):
+                    docker_check = run(["docker", "info"], capture_output=True, text=True)
+                    if docker_check.returncode == 0:
+                        click.secho(
+                            "Depot auth failed (invalid/expired token), falling back to docker. "
+                            "Set FLYTEKIT_USE_DEPOT=false to skip this check.",
+                            fg="yellow",
+                        )
+                        use_depot = False
+
+        self._validate_build_tool(use_depot)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             create_docker_context(image_spec, tmp_path)
 
-            if image_spec.use_depot:
-                command = [
-                    "depot",
-                    "build",
-                    "--tag",
-                    f"{image_spec.image_name()}",
-                    "--platform",
-                    image_spec.platform,
-                ]
-                if image_spec.nix:
-                    command.extend(["--project", "bf5bv9t2mj"])
-            else:
-                command = [
-                    "docker",
-                    "image",
-                    "build",
-                    "--tag",
-                    f"{image_spec.image_name()}",
-                    "--platform",
-                    image_spec.platform,
-                ]
-
-            if image_spec.registry and push and not image_spec.nix:
-                command.append("--push")
+            command = self._build_command(use_depot, image_spec, push)
             command.append(tmp_dir)
 
             concat_command = " ".join(command)
