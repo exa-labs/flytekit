@@ -852,15 +852,15 @@ class DefaultImageBuilder(ImageSpecBuilder):
                     )
                 try:
                     result = run(["docker", "info"], capture_output=True, text=True)
-                    if result.returncode != 0:
-                        raise RuntimeError(
-                            f"Docker daemon is not running or not accessible. Error: {result.stderr}\n"
-                            "Please start Docker daemon."
-                        )
                 except Exception as e:
                     raise RuntimeError(
                         f"Failed to check Docker daemon status: {str(e)}\n"
                         "Please ensure Docker is properly installed and running."
+                    )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Docker daemon is not running or not accessible. Error: {result.stderr}\n"
+                        "Please start Docker daemon."
                     )
                 command = [
                     "docker", "image", "build",
