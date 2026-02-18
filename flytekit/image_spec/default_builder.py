@@ -806,19 +806,30 @@ class DefaultImageBuilder(ImageSpecBuilder):
                         "Nix is not installed or not in PATH. "
                         "Please install Nix (https://nixos.org/download)"
                     )
+                platform_to_nix_system = {
+                    "linux/amd64": "x86_64-linux",
+                    "linux/arm64": "aarch64-linux",
+                }
+                nix_system = platform_to_nix_system.get(image_spec.platform)
+                if not nix_system:
+                    raise RuntimeError(
+                        f"Unsupported platform for nix builds: {image_spec.platform}. "
+                        f"Supported: {', '.join(platform_to_nix_system.keys())}"
+                    )
                 if push and image_spec.registry:
                     ecr_token = subprocess.run(
                         ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
                         capture_output=True, text=True, check=True,
                     ).stdout.strip()
                     command = [
-                        "nix", "run", f"path:{tmp_dir}#docker.copyTo", "--",
+                        "nix", "run",
+                        f"path:{tmp_dir}#packages.{nix_system}.docker.copyTo", "--",
                         f"docker://{image_spec.image_name()}",
                         "--dest-creds", f"AWS:{ecr_token}",
                         "--image-parallel-copies", "32",
                     ]
                 else:
-                    command = ["nix", "build", f"path:{tmp_dir}#docker"]
+                    command = ["nix", "build", f"path:{tmp_dir}#packages.{nix_system}.docker"]
             elif image_spec.use_depot:
                 if not shutil.which("depot"):
                     raise RuntimeError(
