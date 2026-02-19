@@ -68,7 +68,7 @@ from flytekit.core.promise import (
 )
 from flytekit.core.tracker import TrackedInstance
 from flytekit.core.type_engine import TypeEngine, TypeTransformerFailedError
-from flytekit.core.utils import timeit
+from flytekit.core.utils import timeit, _safe_serialize_params
 from flytekit.deck import DeckField
 from flytekit.exceptions.system import (
     FlyteDownloadDataException,
@@ -720,8 +720,8 @@ class PythonTask(TrackedInstance, Task, Generic[T]):
         * ``DynamicJobSpec`` is returned when a dynamic workflow is executed
         """
 
-        # Invoked before the task is executed
-        new_user_params = self.pre_execute(ctx.user_space_params)
+        with timeit("pre_execute"):
+            new_user_params = self.pre_execute(ctx.user_space_params)
 
         if self.enable_deck and ctx.user_space_params is not None:
             if DeckField.TIMELINE.value in self.deck_fields:
@@ -750,7 +750,7 @@ class PythonTask(TrackedInstance, Task, Generic[T]):
             # TODO: Logger should auto inject the current context information to indicate if the task is running within
             #   a workflow or a subworkflow etc
             logger.info(f"Invoking {self.name} with inputs: {native_inputs}")
-            with timeit("Execute user level code"):
+            with timeit("Execute user level code", params=_safe_serialize_params(native_inputs)):
                 try:
                     native_outputs = self.execute(**native_inputs)
                 except Exception as e:
@@ -760,9 +760,8 @@ class PythonTask(TrackedInstance, Task, Generic[T]):
                         raise
                     raise FlyteUserRuntimeException(e) from e
 
-            # Lets run the post_execute method. This may result in a IgnoreOutputs Exception, which is
-            # bubbled up to be handled at the callee layer.
-            native_outputs = self.post_execute(new_user_params, native_outputs)
+            with timeit("post_execute"):
+                native_outputs = self.post_execute(new_user_params, native_outputs)
 
             # Short circuit the translation to literal map because what's returned may be a dj spec (or an
             # already-constructed LiteralMap if the dynamic task was a no-op), not python native values
@@ -778,7 +777,8 @@ class PythonTask(TrackedInstance, Task, Generic[T]):
                     literals_map, native_outputs_as_map = run_sync(
                         self._output_to_literal_map, native_outputs, exec_ctx
                     )
-                self._write_decks(native_inputs, native_outputs_as_map, ctx, new_user_params)
+                with timeit("write_decks"):
+                    self._write_decks(native_inputs, native_outputs_as_map, ctx, new_user_params)
             except (FlyteUploadDataException, FlyteDownloadDataException):
                 raise
             except Exception as e:

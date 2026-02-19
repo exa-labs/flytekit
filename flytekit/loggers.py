@@ -1,6 +1,11 @@
+import json
 import logging
 import os
+import threading
 import typing
+import urllib.request
+from base64 import b64encode
+from datetime import datetime, timezone
 
 from pythonjsonlogger import jsonlogger
 
@@ -18,14 +23,23 @@ LOGGING_DEV_ENV_VAR = "FLYTE_SDK_DEV_LOGGING_LEVEL"
 LOGGING_FMT_ENV_VAR = "FLYTE_SDK_LOGGING_FORMAT"
 LOGGING_RICH_FMT_ENV_VAR = "FLYTE_SDK_RICH_TRACEBACKS"
 
+LOGGING_TELEMETRY_ENV_VAR = "FLYTE_TELEMETRY_ENABLED"
+CLICKHOUSE_URL_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_URL"
+CLICKHOUSE_USER_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_USER"
+CLICKHOUSE_PASSWORD_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_PASSWORD"
+CLICKHOUSE_DATABASE_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_DATABASE"
+CLICKHOUSE_TABLE_ENV_VAR = "FLYTE_TELEMETRY_CLICKHOUSE_TABLE"
+
 # By default, the root flytekit logger to debug so everything is logged, but enable fine-tuning
 logger = logging.getLogger("flytekit")
 user_space_logger = logging.getLogger("user_space")
 developer_logger = logging.getLogger("developer")
+telemetry_logger = logging.getLogger("flytekit.telemetry")
 
 # Stop propagation so that configuration is isolated to this file (so that it doesn't matter what the
 # global Python root logger is set to).
 logger.propagate = False
+telemetry_logger.propagate = False
 
 
 def set_flytekit_log_properties(
@@ -111,10 +125,16 @@ def _get_dev_env_logging_level(default_level: int = logging.INFO) -> int:
     return int(os.getenv(LOGGING_DEV_ENV_VAR, default_level))
 
 
+def _is_telemetry_enabled() -> bool:
+    return os.environ.get(LOGGING_TELEMETRY_ENV_VAR, "1").lower() in ("1", "true", "t")
+
+
 def initialize_global_loggers():
     """
     Initializes the global loggers to the default configuration.
     """
+    _initialize_telemetry_logger()
+
     # Use Rich logging while running in the local execution or jupyter notebook.
     if (os.getenv("FLYTE_INTERNAL_EXECUTION_ID") is None or interactive.ipython_check()) and is_rich_logging_enabled():
         try:
@@ -188,6 +208,82 @@ def get_level_from_cli_verbosity(verbosity: int) -> int:
 
 def is_display_progress_enabled() -> bool:
     return os.getenv(LOGGING_RICH_FMT_ENV_VAR, False)
+
+
+class ClickHouseTelemetrySink:
+    """Inserts each telemetry event as a single row to ClickHouse via HTTP POST.
+
+    Each call to send() fires a background thread that POSTs one JSONEachRow line
+    to ClickHouse's HTTP interface. No buffering, no batching — every step is
+    immediately visible in ClickHouse.
+    """
+
+    def __init__(self):
+        self._url = os.environ.get(CLICKHOUSE_URL_ENV_VAR, "")
+        self._user = os.environ.get(CLICKHOUSE_USER_ENV_VAR, "default")
+        self._password = os.environ.get(CLICKHOUSE_PASSWORD_ENV_VAR, "")
+        self._database = os.environ.get(CLICKHOUSE_DATABASE_ENV_VAR, "default")
+        self._table = os.environ.get(CLICKHOUSE_TABLE_ENV_VAR, "flytekit_telemetry")
+        self._enabled = bool(self._url)
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def send(self, event: typing.Dict[str, typing.Any]):
+        """Insert a single telemetry row in a background thread."""
+        if not self._enabled:
+            return
+        event["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        threading.Thread(target=self._post_row, args=(event,), daemon=True).start()
+
+    def _post_row(self, event: typing.Dict[str, typing.Any]):
+        try:
+            body = json.dumps(event).encode("utf-8")
+            query = f"INSERT INTO {self._database}.{self._table} FORMAT JSONEachRow"
+            url = f"{self._url}/?query={urllib.request.quote(query)}"
+            credentials = b64encode(f"{self._user}:{self._password}".encode()).decode()
+            req = urllib.request.Request(
+                url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Basic {credentials}",
+                },
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+
+_clickhouse_sink: typing.Optional[ClickHouseTelemetrySink] = None
+
+
+def get_clickhouse_sink() -> typing.Optional[ClickHouseTelemetrySink]:
+    return _clickhouse_sink
+
+
+def _initialize_telemetry_logger():
+    global telemetry_logger, _clickhouse_sink
+    if not _is_telemetry_enabled():
+        telemetry_logger.setLevel(logging.CRITICAL + 1)
+        _clickhouse_sink = None
+        return
+
+    _clickhouse_sink = ClickHouseTelemetrySink()
+
+    if not _clickhouse_sink.enabled:
+        telemetry_handler = logging.StreamHandler()
+        telemetry_handler.setLevel(logging.INFO)
+        telemetry_handler.setFormatter(
+            jsonlogger.JsonFormatter(fmt="%(asctime)s %(name)s %(levelname)s %(message)s")
+        )
+        telemetry_logger.handlers.clear()
+        telemetry_logger.addHandler(telemetry_handler)
+        telemetry_logger.setLevel(logging.INFO)
+    else:
+        telemetry_logger.setLevel(logging.CRITICAL + 1)
 
 
 # Default initialization
