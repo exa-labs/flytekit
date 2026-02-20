@@ -156,6 +156,8 @@ def list_all_files(source_path: str, deref_symlinks, ignore_group: Optional[Igno
 
     for root, dirnames, files in os.walk(source_path, topdown=True, followlinks=deref_symlinks):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+        if ignore_group:
+            dirnames[:] = [d for d in dirnames if not ignore_group.is_ignored(os.path.join(root, d))]
         if deref_symlinks:
             inode = os.stat(root).st_ino
             if inode in visited_inodes:
