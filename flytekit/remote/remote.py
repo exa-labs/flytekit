@@ -1397,8 +1397,8 @@ class FlyteRemote(object):
                     )
                     fwf.python_interface = entity.python_interface
                     return fwf
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Version-check-first lookup failed, proceeding with registration: {e}")
 
         if ecr_future is not None:
             ecr_future.result()
