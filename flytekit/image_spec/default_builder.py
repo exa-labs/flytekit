@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -816,18 +817,49 @@ class DefaultImageBuilder(ImageSpecBuilder):
                         f"Unsupported platform for nix builds: {image_spec.platform}. "
                         f"Supported: {', '.join(platform_to_nix_system.keys())}"
                     )
+                machine_to_nix = {"x86_64": "x86_64-linux", "aarch64": "aarch64-linux"}
+                local_system = machine_to_nix.get(platform.machine(), "x86_64-linux")
+                is_cross_build = nix_system != local_system
+
                 if push and image_spec.registry:
                     ecr_token = subprocess.run(
                         ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
                         capture_output=True, text=True, check=True,
                     ).stdout.strip()
-                    command = [
-                        "nix", "run",
-                        f"path:{tmp_dir}#packages.{nix_system}.docker.copyTo", "--",
-                        f"docker://{image_spec.image_name()}",
-                        "--dest-creds", f"AWS:{ecr_token}",
-                        "--image-parallel-copies", "32",
-                    ]
+                    if is_cross_build:
+                        result_link = os.path.join(tmp_dir, "cross-image-result")
+                        build_command = [
+                            "nix", "build",
+                            f"path:{tmp_dir}#packages.{nix_system}.docker",
+                            "-o", result_link,
+                        ]
+                        log_build = list(build_command)
+                        click.secho(f"Cross-build: building {nix_system} image on remote builders", fg="yellow")
+                        click.secho(f"Run command: {' '.join(log_build)} ", fg="blue")
+                        build_result = run(build_command)
+                        if build_result.returncode != 0:
+                            raise RuntimeError(
+                                f"Cross-build failed with exit code {build_result.returncode}: "
+                                f"{' '.join(log_build)}"
+                            )
+                        image_store_path = os.readlink(result_link)
+                        command = [
+                            "nix", "run",
+                            f"path:{tmp_dir}#packages.{local_system}.skopeo-nix2container", "--",
+                            "--insecure-policy", "copy",
+                            f"nix:{image_store_path}",
+                            f"docker://{image_spec.image_name()}",
+                            "--dest-creds", f"AWS:{ecr_token}",
+                            "--image-parallel-copies", "32",
+                        ]
+                    else:
+                        command = [
+                            "nix", "run",
+                            f"path:{tmp_dir}#packages.{nix_system}.docker.copyTo", "--",
+                            f"docker://{image_spec.image_name()}",
+                            "--dest-creds", f"AWS:{ecr_token}",
+                            "--image-parallel-copies", "32",
+                        ]
                 else:
                     command = ["nix", "build", f"path:{tmp_dir}#packages.{nix_system}.docker"]
             elif image_spec.use_depot:
