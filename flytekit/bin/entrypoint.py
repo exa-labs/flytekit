@@ -250,6 +250,7 @@ def _dispatch_execute(
         # Step3b
         if isinstance(e.value, IgnoreOutputs):
             logger.warning(f"User-scoped IgnoreOutputs received! Outputs.pb will not be uploaded. reason {e}!!")
+            flush_telemetry_sink()
             return
 
         # Step3c
