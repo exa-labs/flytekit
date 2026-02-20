@@ -134,10 +134,9 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
         f"Extracted - Account ID: {account_id}, Region: {region}, Repository: {repository}, Tag: {tag}", fg="cyan"
     )
 
-    cache_key = (registry, tag)
+    cache_key = (registry, repository, tag)
     if cache_key in _ecr_existence_cache:
         cached = _ecr_existence_cache[cache_key]
-        click.secho(f"ECR existence cache hit for {registry}:{tag} -> {cached}", fg="cyan")
         return cached
 
     try:

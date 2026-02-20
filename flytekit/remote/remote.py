@@ -1338,6 +1338,7 @@ class FlyteRemote(object):
 
         image_specs = self._get_image_specs(entity)
         ecr_future: typing.Optional[concurrent.futures.Future[None]] = None
+        ecr_executor: typing.Optional[concurrent.futures.ThreadPoolExecutor] = None
         if image_specs:
             ecr_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             ecr_future = ecr_executor.submit(self._prefetch_ecr_existence, image_specs)
@@ -1401,6 +1402,8 @@ class FlyteRemote(object):
 
         if ecr_future is not None:
             ecr_future.result()
+        if ecr_executor is not None:
+            ecr_executor.shutdown(wait=False)
 
         if isinstance(entity, PythonTask):
             return self.register_task(entity, serialization_settings, version)
