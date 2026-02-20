@@ -46,7 +46,7 @@ from flytekit.exceptions.base import FlyteException
 from flytekit.exceptions.system import FlyteNonRecoverableSystemException
 from flytekit.exceptions.user import FlyteRecoverableException, FlyteUserRuntimeException
 from flytekit.interfaces.stats.taggable import get_stats as _get_stats
-from flytekit.loggers import logger, user_space_logger
+from flytekit.loggers import flush_telemetry_sink, logger, user_space_logger
 from flytekit.models import dynamic_job as _dynamic_job
 from flytekit.models import literals as _literal_models
 from flytekit.models.core import errors as _error_models
@@ -323,6 +323,7 @@ def _dispatch_execute(
         with timeit("output_deck"):
             _output_deck(task_name=task_def.name.split(".")[-1], new_user_params=ctx.user_space_params)
 
+    flush_telemetry_sink()
     logger.debug("Finished _dispatch_execute")
 
     if str2bool(os.getenv(FLYTE_FAIL_ON_ERROR)) and error_file_name in output_file_dict:

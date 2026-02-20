@@ -218,6 +218,8 @@ class ClickHouseTelemetrySink:
     immediately visible in ClickHouse.
     """
 
+    _FLUSH_TIMEOUT = 10
+
     def __init__(self):
         self._url = os.environ.get(CLICKHOUSE_URL_ENV_VAR, "")
         self._user = os.environ.get(CLICKHOUSE_USER_ENV_VAR, "default")
@@ -225,6 +227,7 @@ class ClickHouseTelemetrySink:
         self._database = os.environ.get(CLICKHOUSE_DATABASE_ENV_VAR, "default")
         self._table = os.environ.get(CLICKHOUSE_TABLE_ENV_VAR, "flytekit_telemetry")
         self._enabled = bool(self._url)
+        self._pending: typing.List[threading.Thread] = []
 
     @property
     def enabled(self) -> bool:
@@ -235,7 +238,10 @@ class ClickHouseTelemetrySink:
         if not self._enabled:
             return
         event["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        threading.Thread(target=self._post_row, args=(event,), daemon=True).start()
+        t = threading.Thread(target=self._post_row, args=(event,), daemon=True)
+        self._pending = [th for th in self._pending if th.is_alive()]
+        self._pending.append(t)
+        t.start()
 
     def _post_row(self, event: typing.Dict[str, typing.Any]):
         try:
@@ -256,12 +262,23 @@ class ClickHouseTelemetrySink:
         except Exception:
             pass
 
+    def flush(self, timeout: typing.Optional[float] = None):
+        deadline = timeout if timeout is not None else self._FLUSH_TIMEOUT
+        for t in self._pending:
+            t.join(timeout=deadline)
+        self._pending = [t for t in self._pending if t.is_alive()]
+
 
 _clickhouse_sink: typing.Optional[ClickHouseTelemetrySink] = None
 
 
 def get_clickhouse_sink() -> typing.Optional[ClickHouseTelemetrySink]:
     return _clickhouse_sink
+
+
+def flush_telemetry_sink():
+    if _clickhouse_sink is not None:
+        _clickhouse_sink.flush()
 
 
 def _initialize_telemetry_logger():
