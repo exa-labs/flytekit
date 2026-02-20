@@ -817,7 +817,7 @@ class DefaultImageBuilder(ImageSpecBuilder):
                         f"Unsupported platform for nix builds: {image_spec.platform}. "
                         f"Supported: {', '.join(platform_to_nix_system.keys())}"
                     )
-                machine_to_nix = {"x86_64": "x86_64-linux", "aarch64": "aarch64-linux"}
+                machine_to_nix = {"x86_64": "x86_64-linux", "aarch64": "aarch64-linux", "arm64": "aarch64-linux"}
                 local_system = machine_to_nix.get(platform.machine(), "x86_64-linux")
                 is_cross_build = nix_system != local_system
 
