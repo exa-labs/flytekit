@@ -390,7 +390,7 @@ class timeit:
                 ctx = ctx_manager.current_context()
                 params = ctx.user_space_params
                 if params.execution_id is not None:
-                    telemetry_data["execution_id"] = str(params.execution_id)
+                    telemetry_data["execution_id"] = params.execution_id.name
                 if params.task_id is not None:
                     telemetry_data["task_name"] = params.task_id.name
                     telemetry_data["project"] = params.task_id.project
