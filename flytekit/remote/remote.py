@@ -1262,6 +1262,30 @@ class FlyteRemote(object):
             return image_names
         return []
 
+    def _get_image_specs(self, entity: typing.Union[PythonAutoContainerTask, WorkflowBase]) -> typing.List[ImageSpec]:
+        if isinstance(entity, PythonAutoContainerTask) and isinstance(entity.container_image, ImageSpec):
+            return [entity.container_image]
+        if isinstance(entity, WorkflowBase):
+            specs: typing.List[ImageSpec] = []
+            for n in entity.nodes:
+                specs.extend(self._get_image_specs(n.flyte_entity))
+            return specs
+        return []
+
+    @staticmethod
+    def _prefetch_ecr_existence(image_specs: typing.List[ImageSpec]) -> None:
+        """Pre-warm the ECR existence cache for all ImageSpec objects."""
+        from flytekit.image_spec.image_spec import check_ecr_image_exists, is_ecr_registry, check_aws_cli_and_creds
+
+        for spec in image_specs:
+            if spec.registry and is_ecr_registry(spec.registry) and check_aws_cli_and_creds():
+                registry_parts = spec.registry.split("/", 1)
+                if len(registry_parts) > 1:
+                    repository = f"{registry_parts[1]}/{spec.name}"
+                else:
+                    repository = spec.name
+                check_ecr_image_exists(spec.registry.split("/")[0], repository, spec.tag)
+
     def register_script(
         self,
         entity: typing.Union[WorkflowBase, PythonTask, LaunchPlan],
@@ -1295,6 +1319,8 @@ class FlyteRemote(object):
         :param fast_package_options: Options to customize copy_all behavior, ignored when copy_all is False.
         :return:
         """
+        import concurrent.futures
+
         if isinstance(entity, ReferenceWorkflow):
             return entity
         if copy_all:
@@ -1309,6 +1335,12 @@ class FlyteRemote(object):
 
         if image_config is None:
             image_config = ImageConfig.auto_default_image()
+
+        image_specs = self._get_image_specs(entity)
+        ecr_future: typing.Optional[concurrent.futures.Future[None]] = None
+        if image_specs:
+            ecr_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            ecr_future = ecr_executor.submit(self._prefetch_ecr_existence, image_specs)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             if fast_package_options and fast_package_options.copy_style != CopyFileDetection.NO_COPY:
@@ -1341,12 +1373,34 @@ class FlyteRemote(object):
             if isinstance(entity, WorkflowBase):
                 default_inputs = entity.python_interface.default_inputs_as_kwargs
 
-            # The md5 version that we send to S3/GCS has to match the file contents exactly,
-            # but we don't have to use it when registering with the Flyte backend.
-            # For that add the hash of the compilation settings to hash of file
             version = self._version_from_hash(
                 md5_bytes, serialization_settings, default_inputs, *self._get_image_names(entity)
             )
+
+        if isinstance(entity, WorkflowBase) and isinstance(version, str):
+            try:
+                if self._wf_exists(
+                    name=entity.name,
+                    version=version,
+                    project=project or self.default_project,
+                    domain=domain or self.default_domain,
+                ):
+                    logger.info(f"Workflow {entity.name} version {version} already exists, skipping registration")
+                    if ecr_future is not None:
+                        ecr_future.cancel()
+                    fwf = self.fetch_workflow(
+                        project or self.default_project,
+                        domain or self.default_domain,
+                        entity.name,
+                        version,
+                    )
+                    fwf.python_interface = entity.python_interface
+                    return fwf
+            except Exception:
+                pass
+
+        if ecr_future is not None:
+            ecr_future.result()
 
         if isinstance(entity, PythonTask):
             return self.register_task(entity, serialization_settings, version)
@@ -1354,7 +1408,6 @@ class FlyteRemote(object):
         if isinstance(entity, WorkflowBase):
             return self.register_workflow(entity, serialization_settings, version, default_launch_plan, options)
         if isinstance(entity, LaunchPlan):
-            # If it's a launch plan, we need to register the workflow first
             return self.register_launch_plan(entity, version, project, domain, options, serialization_settings)
         raise ValueError(f"Unsupported entity type {type(entity)}")
 

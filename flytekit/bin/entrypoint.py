@@ -718,6 +718,86 @@ def execute_task_cmd(
     )
 
 
+def _parse_fast_execute_args(task_execute_cmd: List[str], additional_distribution: str, dest_dir: str) -> Dict[str, str]:
+    """Parse pyflyte-execute arguments from the raw command list."""
+    args: Dict[str, str] = {}
+    i = 0
+    cmd_list = list(task_execute_cmd)
+    if cmd_list and cmd_list[0] == "pyflyte-execute":
+        i = 1
+
+    resolver_args_list: List[str] = []
+    found_resolver_args = False
+
+    while i < len(cmd_list):
+        arg = cmd_list[i]
+        if arg.startswith("--"):
+            key = arg.lstrip("-").replace("-", "_")
+            if key == "test":
+                args["test"] = "true"
+                i += 1
+                continue
+            if i + 1 < len(cmd_list) and not cmd_list[i + 1].startswith("--"):
+                args[key] = cmd_list[i + 1]
+                if key == "resolver":
+                    found_resolver_args = True
+                i += 2
+                continue
+            i += 1
+        else:
+            if found_resolver_args:
+                resolver_args_list.append(arg)
+            i += 1
+
+    args["dynamic_addl_distro"] = additional_distribution or ""
+    args["dynamic_dest_dir"] = dest_dir or ""
+    args["resolver_args"] = ",".join(resolver_args_list)
+
+    return args
+
+
+def _execute_in_process(
+    task_execute_cmd: List[str],
+    additional_distribution: str,
+    dest_dir: str,
+    dest_dir_resolved: str,
+) -> int:
+    """Run the pyflyte-execute logic in-process instead of spawning a subprocess."""
+    if dest_dir_resolved:
+        if dest_dir_resolved not in sys.path:
+            sys.path.insert(0, dest_dir_resolved)
+        existing = os.environ.get("PYTHONPATH", "")
+        if existing:
+            os.environ["PYTHONPATH"] = existing + os.pathsep + dest_dir_resolved
+        else:
+            os.environ["PYTHONPATH"] = dest_dir_resolved
+
+    parsed = _parse_fast_execute_args(task_execute_cmd, additional_distribution, dest_dir)
+
+    raw_output_data_prefix, checkpoint_path, prev_checkpoint = normalize_inputs(
+        parsed.get("raw_output_data_prefix"),
+        parsed.get("checkpoint_path"),
+        parsed.get("prev_checkpoint"),
+    )
+
+    resolver_args_str = parsed.get("resolver_args", "")
+    resolver_args_tuple = tuple(resolver_args_str.split(",")) if resolver_args_str else ()
+
+    _execute_task(
+        inputs=parsed.get("inputs", ""),
+        output_prefix=parsed.get("output_prefix", ""),
+        raw_output_data_prefix=raw_output_data_prefix,
+        test=parsed.get("test") == "true",
+        resolver=parsed.get("resolver"),
+        resolver_args=resolver_args_tuple,
+        dynamic_addl_distro=parsed.get("dynamic_addl_distro") or None,
+        dynamic_dest_dir=parsed.get("dynamic_dest_dir") or None,
+        checkpoint_path=checkpoint_path,
+        prev_checkpoint=prev_checkpoint,
+    )
+    return 0
+
+
 @_pass_through.command("pyflyte-fast-execute")
 @click.option("--additional-distribution", required=False)
 @click.option("--dest-dir", required=False)
@@ -732,18 +812,26 @@ def fast_execute_task_cmd(additional_distribution: str, dest_dir: str, task_exec
             dest_dir = os.getcwd()
         _download_distribution(additional_distribution, dest_dir)
 
-    # Insert the call to fast before the unbounded resolver args
+    dest_dir_resolved = ""
+    if dest_dir is not None:
+        dest_dir_resolved = os.path.realpath(os.path.expanduser(dest_dir))
+
+    try:
+        returncode = _execute_in_process(task_execute_cmd, additional_distribution, dest_dir, dest_dir_resolved)
+        exit(returncode)
+    except SystemExit:
+        raise
+    except Exception:
+        logger.warning("In-process execute failed, falling back to subprocess", exc_info=True)
+
     cmd = []
     for arg in task_execute_cmd:
         if arg == "--resolver":
             cmd.extend(["--dynamic-addl-distro", additional_distribution, "--dynamic-dest-dir", dest_dir])
         cmd.append(arg)
 
-    # Use the commandline to run the task execute command rather than calling it directly in python code
-    # since the current runtime bytecode references the older user code, rather than the downloaded distribution.
     env = os.environ.copy()
-    if dest_dir is not None:
-        dest_dir_resolved = os.path.realpath(os.path.expanduser(dest_dir))
+    if dest_dir_resolved:
         if "PYTHONPATH" in env:
             env["PYTHONPATH"] += os.pathsep + dest_dir_resolved
         else:
