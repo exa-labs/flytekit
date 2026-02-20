@@ -173,26 +173,28 @@ RUN apt-get update -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Nix using cache mount so it persists across builds
-RUN --mount=type=cache,target=/nix,id=nix-determinate \
-    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-        sh -s -- install linux \
-        --determinate \
-        --extra-conf "sandbox = true" \
-        --extra-conf "max-substitution-jobs = 256" \
-        --extra-conf "http-connections = 256" \
-        --extra-conf "download-buffer-size = 1073741824" \
-        --init none \
-        --no-confirm
-
 # Create a working directory for the build
 WORKDIR /build
 
-# Build with cache mount - reuses the same cache across builds
+# Install Nix (if not cached) and build in a single step so the cache mount
+# is guaranteed to be available when sourcing nix-daemon.sh.
+# Two separate RUN steps break on builders (e.g. Depot) that don't share
+# cache-mount contents across steps on different machines.
 RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
+    if [ ! -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then \
+        curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+            sh -s -- install linux \
+            --determinate \
+            --extra-conf "sandbox = true" \
+            --extra-conf "max-substitution-jobs = 256" \
+            --extra-conf "http-connections = 256" \
+            --extra-conf "download-buffer-size = 1073741824" \
+            --init none \
+            --no-confirm; \
+    fi && \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
     nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
     --image-parallel-copies 32 \
