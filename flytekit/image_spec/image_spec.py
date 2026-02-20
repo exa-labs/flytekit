@@ -25,7 +25,7 @@ DOCKER_HUB = "docker.io"
 _F_IMG_ID = "_F_IMG_ID"
 FLYTE_FORCE_PUSH_IMAGE_SPEC = "FLYTE_FORCE_PUSH_IMAGE_SPEC"
 
-_ecr_existence_cache: Dict[Tuple[str, str], bool] = {}
+_ecr_existence_cache: Dict[Tuple[str, str, str], bool] = {}
 
 
 # Shared helpers for Nix flake path inputs and git root discovery
