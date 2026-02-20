@@ -819,7 +819,7 @@ class DefaultImageBuilder(ImageSpecBuilder):
                     )
                 os_suffix = "darwin" if platform.system() == "Darwin" else "linux"
                 machine_to_nix = {"x86_64": f"x86_64-{os_suffix}", "aarch64": f"aarch64-{os_suffix}", "arm64": f"aarch64-{os_suffix}"}
-                local_system = machine_to_nix.get(platform.machine(), "x86_64-linux")
+                local_system = machine_to_nix.get(platform.machine(), f"x86_64-{os_suffix}")
                 is_cross_build = nix_system != local_system
 
                 if push and image_spec.registry:
