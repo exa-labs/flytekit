@@ -1,6 +1,6 @@
+import atexit
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -751,6 +751,99 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
     dockerfile_path.write_text(docker_content)
 
 
+_NIX_RUNNER_SSH_KEY_SECRET = "nix-runner-ssh-key"
+
+_NIX_RUNNERS = {
+    "x86_64-linux": [
+        "44.234.0.242",
+        "44.242.48.117",
+        "34.216.98.215",
+        "184.36.0.123",
+        "35.83.219.90",
+        "34.212.160.119",
+        "52.25.241.82",
+    ],
+    "aarch64-linux": [
+        "44.235.104.178",
+        "44.227.28.67",
+        "52.27.13.146",
+        "34.212.130.155",
+        "44.235.158.160",
+        "44.233.197.0",
+        "16.146.179.30",
+    ],
+}
+
+_SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+
+
+def _load_nix_runner_ssh_key() -> str:
+    key_path = f"/tmp/nix-runner-ssh-key-flytekit-{os.getpid()}"
+    if os.path.exists(key_path):
+        return key_path
+    result = subprocess.run(
+        [
+            "aws", "secretsmanager", "get-secret-value",
+            "--secret-id", _NIX_RUNNER_SSH_KEY_SECRET,
+            "--query", "SecretString", "--output", "text",
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    with open(key_path, "w") as f:
+        f.write(result.stdout)
+    os.chmod(key_path, 0o600)
+    atexit.register(lambda: os.remove(key_path) if os.path.exists(key_path) else None)
+    return key_path
+
+
+def _nix_build_on_runner(
+    flake_ref: str,
+    attr: str,
+    system: str,
+    runner: str,
+    ssh_key_path: str,
+) -> str:
+    env = {**os.environ, "NIX_SSHOPTS": " ".join(_SSH_OPTS)}
+    store_uri = f"ssh-ng://root@{runner}?ssh-key={ssh_key_path}"
+    cmd = [
+        "nix", "build",
+        "--no-link", "--print-out-paths",
+        "--builders", "",
+        "--eval-store", "auto",
+        "--store", store_uri,
+        "--system", system,
+        f"{flake_ref}#{attr}",
+    ]
+    click.secho(f"[nix-runner] Building {attr} on {runner} ({system})", fg="yellow")
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"nix build on runner {runner} failed (exit {result.returncode}):\n{result.stderr}"
+        )
+    store_path = result.stdout.strip()
+    click.secho(f"[nix-runner] Built: {store_path}", fg="green")
+    return store_path
+
+
+def _nix_run_on_runner(
+    runner: str,
+    ssh_key_path: str,
+    executable: str,
+    args: list,
+    env_vars: dict,
+) -> int:
+    env_str = " ".join(f"{k}='{v}'" for k, v in env_vars.items())
+    remote_cmd = f"{env_str} {executable} {' '.join(args)}" if env_vars else f"{executable} {' '.join(args)}"
+    cmd = ["ssh", "-i", ssh_key_path, *_SSH_OPTS, f"root@{runner}", remote_cmd]
+    log_cmd = list(cmd)
+    for i, a in enumerate(log_cmd):
+        if "AWS:" in a:
+            log_cmd[i] = "[REDACTED]"
+    click.secho(f"[nix-runner] Pushing from {runner}", fg="yellow")
+    result = run(cmd)
+    return result.returncode
+
+
 class DefaultImageBuilder(ImageSpecBuilder):
     """Image builder using Docker and buildkit."""
 
@@ -817,30 +910,44 @@ class DefaultImageBuilder(ImageSpecBuilder):
                         f"Unsupported platform for nix builds: {image_spec.platform}. "
                         f"Supported: {', '.join(platform_to_nix_system.keys())}"
                     )
-                os_suffix = "darwin" if platform.system() == "Darwin" else "linux"
-                machine_to_nix = {"x86_64": f"x86_64-{os_suffix}", "aarch64": f"aarch64-{os_suffix}", "arm64": f"aarch64-{os_suffix}"}
-                local_system = machine_to_nix.get(platform.machine(), f"x86_64-{os_suffix}")
-                is_cross_build = nix_system != local_system
+
+                runners = _NIX_RUNNERS.get(nix_system)
+                if not runners:
+                    raise RuntimeError(f"No nix runners configured for {nix_system}")
+                runner = runners[0]
+                ssh_key_path = _load_nix_runner_ssh_key()
+                flake_ref = f"path:{tmp_dir}"
+                docker_attr = f"packages.{nix_system}.docker"
 
                 if push and image_spec.registry:
+                    copy_to_path = _nix_build_on_runner(
+                        flake_ref, f"{docker_attr}.copyTo",
+                        nix_system, runner, ssh_key_path,
+                    )
                     ecr_token = subprocess.run(
                         ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
                         capture_output=True, text=True, check=True,
                     ).stdout.strip()
-                    if is_cross_build:
-                        docker_attr = f"packages.{local_system}.docker-{nix_system}.copyTo"
-                        click.secho(f"Cross-build: {nix_system} image via {local_system} n2c", fg="yellow")
-                    else:
-                        docker_attr = f"packages.{nix_system}.docker.copyTo"
-                    command = [
-                        "nix", "run",
-                        f"path:{tmp_dir}#{docker_attr}", "--",
-                        f"docker://{image_spec.image_name()}",
-                        "--dest-creds", f"AWS:{ecr_token}",
-                        "--image-parallel-copies", "32",
-                    ]
+                    rc = _nix_run_on_runner(
+                        runner, ssh_key_path,
+                        f"{copy_to_path}/bin/copy-to",
+                        [
+                            f"docker://{image_spec.image_name()}",
+                            "--dest-creds", f"'AWS:{ecr_token}'",
+                            "--image-parallel-copies", "32",
+                        ],
+                        env_vars={},
+                    )
+                    if rc != 0:
+                        raise RuntimeError(f"Push from runner {runner} failed (exit {rc})")
+                    click.secho(f"[nix-runner] Pushed {image_spec.image_name()}", fg="green")
+                    return image_spec.image_name()
                 else:
-                    command = ["nix", "build", f"path:{tmp_dir}#packages.{nix_system}.docker"]
+                    _nix_build_on_runner(
+                        flake_ref, docker_attr,
+                        nix_system, runner, ssh_key_path,
+                    )
+                    return image_spec.image_name()
             elif image_spec.use_depot:
                 if not shutil.which("depot"):
                     raise RuntimeError(
