@@ -789,9 +789,9 @@ def _load_nix_runner_ssh_key() -> str:
         ],
         capture_output=True, text=True, check=True,
     )
-    with open(key_path, "w") as f:
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(result.stdout)
-    os.chmod(key_path, 0o600)
     atexit.register(lambda: os.remove(key_path) if os.path.exists(key_path) else None)
     return key_path
 
@@ -838,7 +838,8 @@ def _nix_run_on_runner(
     log_cmd = list(cmd)
     for i, a in enumerate(log_cmd):
         if "AWS:" in a:
-            log_cmd[i] = "[REDACTED]"
+            log_cmd[i] = re.sub(r"AWS:[^'\s]*", "AWS:[REDACTED]", a)
+    click.secho(f"[nix-runner] Run command: {' '.join(log_cmd)}", fg="blue")
     click.secho(f"[nix-runner] Pushing from {runner}", fg="yellow")
     result = run(cmd)
     return result.returncode
