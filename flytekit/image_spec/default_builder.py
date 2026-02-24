@@ -1,6 +1,5 @@
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -157,6 +156,49 @@ USER flytekit
 RUN mkdir -p $$HOME && \
     echo "export PATH=$$PATH" >> $$HOME/.profile
 """)
+
+NIX_DOCKER_FILE_TEMPLATE = Template("""\
+# Use Ubuntu as base instead of nixpkgs/nix for better compatibility
+FROM ubuntu:24.04
+
+# Install curl and other basic dependencies needed for the installer
+RUN apt-get update -y && \
+    apt-get install -y \
+        curl \
+        sudo \
+        xz-utils \
+        git \
+        ca-certificates \
+        rsync && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Nix using cache mount so it persists across builds
+RUN --mount=type=cache,target=/nix,id=nix-determinate \
+    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
+        sh -s -- install linux \
+        --determinate \
+        --extra-conf "sandbox = true" \
+        --extra-conf "max-substitution-jobs = 256" \
+        --extra-conf "http-connections = 256" \
+        --extra-conf "download-buffer-size = 1073741824" \
+        --init none \
+        --no-confirm
+
+# Create a working directory for the build
+WORKDIR /build
+
+# Build with cache mount - reuses the same cache across builds
+RUN --mount=type=bind,source=.,target=/build/ \
+    --mount=type=cache,target=/nix,id=nix-determinate \
+    --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
+    --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
+    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+    nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
+    --image-parallel-copies 32 \
+    --dest-creds "AWS:$ECR_TOKEN"
+""")
+
 
 def get_flytekit_for_pypi():
     """Get flytekit version on PyPI."""
@@ -729,7 +771,16 @@ RUN --mount=type=cache,sharing=locked,mode=0777,target=/root/.cache/uv,id=uv \\
         uv_venv_install = ""
 
     if image_spec.nix:
-        return
+        docker_content = NIX_DOCKER_FILE_TEMPLATE.substitute(
+            IMAGE_NAME=image_spec.image_name(),
+            COPY_LOCAL_PACKAGES=copy_local_packages,
+            ECR_TOKEN=subprocess.run(
+                ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip(),
+        )
     else:
         docker_content = DOCKER_FILE_TEMPLATE.substitute(
             UV_PYTHON_INSTALL_COMMAND=uv_python_install_command,
@@ -786,6 +837,8 @@ class DefaultImageBuilder(ImageSpecBuilder):
         )
 
     def _build_image(self, image_spec: ImageSpec, *, push: bool = True) -> str:
+        # For testing, set `push=False`` to just build the image locally and not push to
+        # registry
         unsupported_parameters = [
             name
             for name, value in vars(image_spec).items()
@@ -795,102 +848,67 @@ class DefaultImageBuilder(ImageSpecBuilder):
             msg = f"The following parameters are unsupported and ignored: {unsupported_parameters}"
             warnings.warn(msg, UserWarning, stacklevel=2)
 
+        # Check if build tools are available
         import shutil
+
+        if image_spec.use_depot:
+            if not shutil.which("depot"):
+                raise RuntimeError(
+                    "Depot is not installed or not in PATH. "
+                    "Please install depot (https://depot.dev/docs/installation) or use Docker instead by setting use_depot=False"
+                )
+        else:
+            if not shutil.which("docker"):
+                raise RuntimeError(
+                    "Docker is not installed or not in PATH. "
+                    "Please install Docker (https://docs.docker.com/get-docker/) or use depot by setting use_depot=True"
+                )
+
+            # Check if Docker daemon is running
+            try:
+                result = run(["docker", "info"], capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Docker daemon is not running or not accessible. Error: {result.stderr}\n"
+                        "Please start Docker daemon or use depot by setting use_depot=True"
+                    )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to check Docker daemon status: {str(e)}\n"
+                    "Please ensure Docker is properly installed and running, or use depot by setting use_depot=True"
+                )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             create_docker_context(image_spec, tmp_path)
 
-            if image_spec.nix:
-                if not shutil.which("nix"):
-                    raise RuntimeError(
-                        "Nix is not installed or not in PATH. "
-                        "Please install Nix (https://nixos.org/download)"
-                    )
-                platform_to_nix_system = {
-                    "linux/amd64": "x86_64-linux",
-                    "linux/arm64": "aarch64-linux",
-                }
-                nix_system = platform_to_nix_system.get(image_spec.platform)
-                if not nix_system:
-                    raise RuntimeError(
-                        f"Unsupported platform for nix builds: {image_spec.platform}. "
-                        f"Supported: {', '.join(platform_to_nix_system.keys())}"
-                    )
-                os_suffix = "darwin" if platform.system() == "Darwin" else "linux"
-                machine_to_nix = {"x86_64": f"x86_64-{os_suffix}", "aarch64": f"aarch64-{os_suffix}", "arm64": f"aarch64-{os_suffix}"}
-                local_system = machine_to_nix.get(platform.machine(), f"x86_64-{os_suffix}")
-                is_cross_build = nix_system != local_system
-
-                if push and image_spec.registry:
-                    ecr_token = subprocess.run(
-                        ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
-                        capture_output=True, text=True, check=True,
-                    ).stdout.strip()
-                    if is_cross_build:
-                        docker_attr = f"packages.{local_system}.docker-{nix_system}.copyTo"
-                        click.secho(f"Cross-build: {nix_system} image via {local_system} n2c", fg="yellow")
-                    else:
-                        docker_attr = f"packages.{nix_system}.docker.copyTo"
-                    command = [
-                        "nix", "run",
-                        f"path:{tmp_dir}#{docker_attr}", "--",
-                        f"docker://{image_spec.image_name()}",
-                        "--dest-creds", f"AWS:{ecr_token}",
-                        "--image-parallel-copies", "32",
-                    ]
-                else:
-                    command = ["nix", "build", f"path:{tmp_dir}#packages.{nix_system}.docker"]
-            elif image_spec.use_depot:
-                if not shutil.which("depot"):
-                    raise RuntimeError(
-                        "Depot is not installed or not in PATH. "
-                        "Please install depot (https://depot.dev/docs/installation) or use Docker instead by setting use_depot=False"
-                    )
+            if image_spec.use_depot:
                 command = [
-                    "depot", "build",
-                    "--tag", f"{image_spec.image_name()}",
-                    "--platform", image_spec.platform,
+                    "depot",
+                    "build",
+                    "--tag",
+                    f"{image_spec.image_name()}",
+                    "--platform",
+                    image_spec.platform,
                 ]
-                if image_spec.registry and push:
-                    command.append("--push")
-                command.append(tmp_dir)
+                if image_spec.nix:
+                    command.extend(["--project", "bf5bv9t2mj"])
             else:
-                if not shutil.which("docker"):
-                    raise RuntimeError(
-                        "Docker is not installed or not in PATH. "
-                        "Please install Docker (https://docs.docker.com/get-docker/)"
-                    )
-                try:
-                    result = run(["docker", "info"], capture_output=True, text=True)
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to check Docker daemon status: {str(e)}\n"
-                        "Please ensure Docker is properly installed and running."
-                    )
-                if result.returncode != 0:
-                    raise RuntimeError(
-                        f"Docker daemon is not running or not accessible. Error: {result.stderr}\n"
-                        "Please start Docker daemon."
-                    )
                 command = [
-                    "docker", "image", "build",
-                    "--tag", f"{image_spec.image_name()}",
-                    "--platform", image_spec.platform,
+                    "docker",
+                    "image",
+                    "build",
+                    "--tag",
+                    f"{image_spec.image_name()}",
+                    "--platform",
+                    image_spec.platform,
                 ]
-                if image_spec.registry and push:
-                    command.append("--push")
-                command.append(tmp_dir)
 
-            log_command = list(command)
-            for i, arg in enumerate(log_command):
-                if arg == "--dest-creds" and i + 1 < len(log_command):
-                    log_command[i + 1] = "[REDACTED]"
-            click.secho(f"Run command: {' '.join(log_command)} ", fg="blue")
-            result = run(command)
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Build command failed with exit code {result.returncode}: "
-                    f"{' '.join(log_command)}"
-                )
+            if image_spec.registry and push and not image_spec.nix:
+                command.append("--push")
+            command.append(tmp_dir)
+
+            concat_command = " ".join(command)
+            click.secho(f"Run command: {concat_command} ", fg="blue")
+            run(command, check=True)
             return image_spec.image_name()
