@@ -1,6 +1,5 @@
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -817,24 +816,14 @@ class DefaultImageBuilder(ImageSpecBuilder):
                         f"Unsupported platform for nix builds: {image_spec.platform}. "
                         f"Supported: {', '.join(platform_to_nix_system.keys())}"
                     )
-                os_suffix = "darwin" if platform.system() == "Darwin" else "linux"
-                machine_to_nix = {"x86_64": f"x86_64-{os_suffix}", "aarch64": f"aarch64-{os_suffix}", "arm64": f"aarch64-{os_suffix}"}
-                local_system = machine_to_nix.get(platform.machine(), f"x86_64-{os_suffix}")
-                is_cross_build = nix_system != local_system
-
                 if push and image_spec.registry:
                     ecr_token = subprocess.run(
                         ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
                         capture_output=True, text=True, check=True,
                     ).stdout.strip()
-                    if is_cross_build:
-                        docker_attr = f"packages.{local_system}.docker-{nix_system}.copyTo"
-                        click.secho(f"Cross-build: {nix_system} image via {local_system} n2c", fg="yellow")
-                    else:
-                        docker_attr = f"packages.{nix_system}.docker.copyTo"
                     command = [
                         "nix", "run",
-                        f"path:{tmp_dir}#{docker_attr}", "--",
+                        f"path:{tmp_dir}#packages.{nix_system}.docker.copyTo", "--",
                         f"docker://{image_spec.image_name()}",
                         "--dest-creds", f"AWS:{ecr_token}",
                         "--image-parallel-copies", "32",
