@@ -21,6 +21,7 @@ from flytekit.image_spec.image_spec import (
     ImageSpec,
     ImageSpecBuilder,
     _find_git_root,
+    discover_nix_flake_lock_path_inputs,
     discover_nix_flake_path_inputs,
 )
 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
@@ -389,23 +390,22 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         flake_path_replacements = {}
         inputs = discover_nix_flake_path_inputs(lock_dir, flake_content)
 
-        for inp in inputs:
-            full_spec = inp.full_spec
-            old_rel_path = inp.old_rel_path
-            src_path = inp.src_path
+        # Also discover transitive path deps from flake.lock (e.g. minos2_rust -> rust-exautils)
+        already_discovered = {str(inp.src_path) for inp in inputs}
+        transitive_inputs = discover_nix_flake_lock_path_inputs(
+            lock_dir, flake_lock_content, already_discovered
+        )
 
+        def _copy_nix_input(inp):
+            src_path = inp.src_path
             if not src_path.exists():
                 raise ValueError(f"Nix flake path input does not exist: {src_path}")
-
             git_root = _find_git_root(str(src_path))
             if git_root is None:
                 raise ValueError(f"Could not find git root for Nix flake path input: {src_path}")
-
             rel_path = os.path.relpath(path=str(src_path), start=str(git_root))
             target_path = local_packages_dir / rel_path
             target_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Copy with ignore patterns
             if src_path.is_dir():
                 ignore_group_dep = IgnoreGroup(str(src_path), [GitIgnore, DockerIgnore, StandardIgnore])
                 files_to_copy_dep, _ = ls_files(
@@ -421,14 +421,21 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
                     shutil.copy2(file_to_copy, file_dst)
             else:
                 shutil.copy2(str(src_path), str(target_path))
+            return rel_path
 
+        # Copy and rewrite direct inputs (referenced in flake.nix)
+        for inp in inputs:
+            rel_path = _copy_nix_input(inp)
             new_rel_path = f"local_packages/{rel_path}"
+            flake_content = flake_content.replace(inp.full_spec, f"path:{new_rel_path}")
+            flake_path_replacements[inp.old_rel_path] = new_rel_path
 
-            # Update flake.nix content in-memory
-            flake_content = flake_content.replace(full_spec, f"path:{new_rel_path}")
-
-            # Track mapping for flake.lock updates
-            flake_path_replacements[old_rel_path] = new_rel_path
+        # Copy transitive inputs (only in flake.lock, resolved relative to parent)
+        # Only copy them - do NOT rewrite their paths in the top-level flake.lock
+        # because nix resolves transitive dep paths relative to the parent input,
+        # and the relative structure is preserved under local_packages/
+        for inp in transitive_inputs:
+            _copy_nix_input(inp)
 
         # Update flake.lock JSON for nodes that reference local path inputs
         if flake_path_replacements:
