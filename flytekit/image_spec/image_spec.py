@@ -82,6 +82,75 @@ def discover_nix_flake_path_inputs(
     return inputs
 
 
+def discover_nix_flake_lock_path_inputs(
+    lock_dir: typing.Union[str, pathlib.Path],
+    flake_lock_content: typing.Optional[str] = None,
+    already_discovered: typing.Optional[typing.Set[str]] = None,
+) -> List[NixFlakePathInput]:
+    """Discover transitive path inputs from flake.lock not already found in flake.nix.
+
+    Nix flake.lock records all resolved inputs including transitive ones. When a
+    direct path input (e.g. minos2_rust) itself depends on another path input
+    (e.g. rust-exautils), that transitive dependency only appears in flake.lock,
+    not in the top-level flake.nix. This function discovers those transitive path
+    dependencies so they can be copied into the Docker build context.
+
+    Args:
+        lock_dir: Directory containing flake.lock
+        flake_lock_content: Optional preloaded flake.lock JSON; if None, the file is read
+        already_discovered: Set of resolved src_path strings already discovered from
+            flake.nix (to avoid duplicates)
+
+    Returns:
+        List of NixFlakePathInput entries for transitive path inputs.
+    """
+    import json
+
+    lock_dir_path = pathlib.Path(lock_dir)
+    if flake_lock_content is None:
+        flake_lock_path = lock_dir_path / "flake.lock"
+        if not flake_lock_path.exists():
+            return []
+        flake_lock_content = flake_lock_path.read_text()
+
+    if already_discovered is None:
+        already_discovered = set()
+
+    try:
+        lock_data = json.loads(flake_lock_content)
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    nodes = lock_data.get("nodes", {})
+    inputs: List[NixFlakePathInput] = []
+
+    for node in nodes.values():
+        locked = node.get("locked", {})
+        if locked.get("type") != "path":
+            continue
+
+        old_rel_path = locked.get("path")
+        if not old_rel_path:
+            continue
+
+        if os.path.isabs(old_rel_path):
+            src_path = pathlib.Path(old_rel_path).resolve()
+        else:
+            src_path = (lock_dir_path / old_rel_path).resolve()
+
+        if str(src_path) in already_discovered:
+            continue
+
+        if not src_path.exists():
+            continue
+
+        full_spec = f"path:{old_rel_path}"
+        inputs.append(NixFlakePathInput(full_spec=full_spec, old_rel_path=old_rel_path, src_path=src_path))
+        already_discovered.add(str(src_path))
+
+    return inputs
+
+
 def _compute_directory_digest(dir_path: pathlib.Path) -> str:
     """Compute a stable digest for a directory mirroring builder copy logic (respects .gitignore/.dockerignore)."""
     # Imports here to avoid circular imports at module load time
@@ -418,6 +487,12 @@ class ImageSpec:
 
                     try:
                         flake_inputs = discover_nix_flake_path_inputs(lock_dir)
+                        # Also discover transitive path deps from flake.lock
+                        already_discovered = {str(inp.src_path) for inp in flake_inputs}
+                        transitive_inputs = discover_nix_flake_lock_path_inputs(
+                            lock_dir, None, already_discovered
+                        )
+                        flake_inputs = flake_inputs + transitive_inputs
                     except Exception:
                         flake_inputs = []
 

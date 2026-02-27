@@ -21,6 +21,7 @@ from flytekit.image_spec.image_spec import (
     ImageSpec,
     ImageSpecBuilder,
     _find_git_root,
+    discover_nix_flake_lock_path_inputs,
     discover_nix_flake_path_inputs,
 )
 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
@@ -389,7 +390,16 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
         flake_path_replacements = {}
         inputs = discover_nix_flake_path_inputs(lock_dir, flake_content)
 
-        for inp in inputs:
+        # Track already-discovered paths to avoid duplicates when scanning flake.lock
+        already_discovered = {str(inp.src_path) for inp in inputs}
+
+        # Also discover transitive path deps from flake.lock (e.g. minos2_rust -> rust-exautils)
+        transitive_inputs = discover_nix_flake_lock_path_inputs(
+            lock_dir, flake_lock_content, already_discovered
+        )
+        all_nix_inputs = inputs + transitive_inputs
+
+        for inp in all_nix_inputs:
             full_spec = inp.full_spec
             old_rel_path = inp.old_rel_path
             src_path = inp.src_path
@@ -424,8 +434,9 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
             new_rel_path = f"local_packages/{rel_path}"
 
-            # Update flake.nix content in-memory
-            flake_content = flake_content.replace(full_spec, f"path:{new_rel_path}")
+            # Update flake.nix content in-memory (only for direct inputs found in flake.nix)
+            if inp in inputs:
+                flake_content = flake_content.replace(full_spec, f"path:{new_rel_path}")
 
             # Track mapping for flake.lock updates
             flake_path_replacements[old_rel_path] = new_rel_path
