@@ -387,7 +387,34 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     if image_spec.nix:
         # Detect and copy flake path inputs into local_packages, then rewrite flake.nix/flake.lock
         flake_path_replacements = {}
+
+        # Discover direct path inputs from flake.nix
         inputs = discover_nix_flake_path_inputs(lock_dir, flake_content)
+
+        # Also discover transitive path inputs from flake.lock (these are
+        # dependencies of dependencies that use path: references)
+        try:
+            flake_lock_obj = json.loads(flake_lock_content)
+            lock_nodes = flake_lock_obj.get("nodes", {})
+            direct_paths = {inp.old_rel_path for inp in inputs}
+            for node in lock_nodes.values():
+                locked = node.get("locked", {})
+                if locked.get("type") == "path":
+                    lock_path = locked.get("path", "")
+                    if lock_path and lock_path not in direct_paths:
+                        if os.path.isabs(lock_path):
+                            src_path = Path(lock_path).resolve()
+                        else:
+                            src_path = (lock_dir / lock_path).resolve()
+                        if src_path.exists():
+                            inputs.append(NixFlakePathInput(
+                                full_spec=f"path:{lock_path}",
+                                old_rel_path=lock_path,
+                                src_path=src_path,
+                            ))
+                            direct_paths.add(lock_path)
+        except Exception:
+            pass  # If flake.lock parsing fails, proceed with direct inputs only
 
         for inp in inputs:
             full_spec = inp.full_spec
