@@ -777,6 +777,15 @@ class DefaultImageBuilder(ImageSpecBuilder):
         # "registry_config",
         "commands",
         "copy",
+        "install_project",
+        "use_depot",
+        "uv_export_args",
+        "vendor_local",
+        "nix",
+        "tag",
+        "entrypoint",
+        "python_exec",
+        "tag_format",
     }
 
     def build_image(self, image_spec: ImageSpec) -> str:
