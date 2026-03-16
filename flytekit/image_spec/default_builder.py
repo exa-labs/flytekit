@@ -785,6 +785,7 @@ class DefaultImageBuilder(ImageSpecBuilder):
         "tag",
         "entrypoint",
         "python_exec",
+        "pip_extra_args",
         "tag_format",
     }
 
