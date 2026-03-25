@@ -4,6 +4,8 @@ Kubernetes. It leverages `Pytorch Job <https://github.com/kubeflow/pytorch-opera
 """
 
 import os
+import socket
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
@@ -305,6 +307,60 @@ def _convert_run_policy_to_flyte_idl(
     )
 
 
+_RDZV_DNS_RETRY_INTERVAL_S = 2
+_RDZV_DNS_RETRY_TIMEOUT_S = 120
+
+
+def _resolve_rdzv_endpoint(endpoint: str) -> str:
+    """Resolve the rendezvous endpoint hostname to an IP, retrying on failure.
+
+    When pods run with hostNetwork=True (e.g. EFA/RDMA workloads), the training
+    operator's per-worker headless service may not resolve immediately. CoreDNS
+    only returns endpoints whose backing pod is Ready, and there is a race between
+    the container starting (and calling this code) and the endpoint controller
+    marking the pod Ready.  Retrying for up to ``_RDZV_DNS_RETRY_TIMEOUT_S``
+    seconds bridges that gap.
+
+    If the hostname is already an IP or ``localhost``, it is returned unchanged.
+    If resolution still fails after all retries, the original endpoint is returned
+    so that torch's own error handling can report the failure.
+    """
+    if endpoint in ("localhost:0", ""):
+        return endpoint
+
+    host, _, port = endpoint.rpartition(":")
+    if not host or not port:
+        return endpoint
+
+    # Skip if host is already an IPv4 address.
+    try:
+        socket.inet_aton(host)
+        return endpoint
+    except OSError:
+        pass
+
+    deadline = time.monotonic() + _RDZV_DNS_RETRY_TIMEOUT_S
+    attempt = 0
+    while True:
+        try:
+            addrs = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+            ip = addrs[0][4][0]
+            if attempt > 0:
+                logger.info(f"Resolved rendezvous endpoint {host} -> {ip} after {attempt} retries")
+            return f"{ip}:{port}"
+        except socket.gaierror:
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    f"Failed to resolve rendezvous endpoint '{host}' after "
+                    f"{_RDZV_DNS_RETRY_TIMEOUT_S}s, proceeding with original endpoint"
+                )
+                return endpoint
+            attempt += 1
+            if attempt == 1:
+                logger.info(f"Waiting for rendezvous endpoint '{host}' to become resolvable...")
+            time.sleep(_RDZV_DNS_RETRY_INTERVAL_S)
+
+
 class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     """
     Plugin for distributed training with torch elastic/torchrun (see
@@ -418,6 +474,13 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         max_restarts = int(os.environ.get("PET_MAX_RESTARTS", self._task_config.max_restarts))
         monitor_interval = int(os.environ.get("PET_MONITOR_INTERVAL", self._task_config.monitor_interval))
         rdzv_endpoint = os.environ.get("PET_RDZV_ENDPOINT", "localhost:0")
+
+        # Resolve the rendezvous endpoint hostname to an IP address, retrying
+        # if DNS is not yet available. With hostNetwork=True (common for EFA/RDMA
+        # workloads), the training operator's headless service may not resolve
+        # immediately because CoreDNS only returns ready endpoints and the pod
+        # may not be marked Ready yet by the endpoint controller.
+        rdzv_endpoint = _resolve_rdzv_endpoint(rdzv_endpoint)
 
         # If OMP_NUM_THREADS is not set, set it to 1 to avoid overloading the system.
         # Doing so to copy the default behavior of torchrun.
