@@ -96,6 +96,18 @@ class wandb_init(ClassDecorator):
 
         run = wandb.init(project=self.project, entity=self.entity, id=wand_id, **self.init_kwargs)
 
+        # Store Flyte execution metadata in wandb run config for reverse lookups.
+        if not is_local_execution:
+            exec_id = ctx.user_space_params.execution_id
+            run.config.update(
+                {
+                    "flyte_execution_id": exec_id.name,
+                    "flyte_execution_project": exec_id.project,
+                    "flyte_execution_domain": exec_id.domain,
+                },
+                allow_val_change=True,
+            )
+
         # If FLYTE_EXECUTION_URL is defined, inject it into wandb to link back to the execution.
         execution_url = os.getenv("FLYTE_EXECUTION_URL")
         if execution_url is not None:
