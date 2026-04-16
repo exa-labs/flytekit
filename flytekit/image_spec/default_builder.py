@@ -178,6 +178,7 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
     curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
         --determinate \
+        --extra-conf "experimental-features = nix-command flakes" \
         --extra-conf "sandbox = true" \
         --extra-conf "max-substitution-jobs = 256" \
         --extra-conf "http-connections = 256" \
