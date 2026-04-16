@@ -174,7 +174,7 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Nix using cache mount so it persists across builds
-RUN --mount=type=cache,target=/nix,id=nix-determinate \
+RUN --mount=type=cache,target=/nix,id=nix-determinate-v2 \
     curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
         sh -s -- install linux \
         --determinate \
@@ -191,7 +191,7 @@ WORKDIR /build
 
 # Build with cache mount - reuses the same cache across builds
 RUN --mount=type=bind,source=.,target=/build/ \
-    --mount=type=cache,target=/nix,id=nix-determinate \
+    --mount=type=cache,target=/nix,id=nix-determinate-v2 \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
