@@ -670,6 +670,28 @@ def _store_uri_with_ssh_key(builder: _NixRemoteBuilder) -> str:
     return f"{builder.store_uri}{separator}ssh-key={builder.ssh_key}"
 
 
+def _ssh_binary() -> Optional[str]:
+    candidates = [
+        shutil.which("ssh"),
+        "/run/current-system/sw/bin/ssh",
+        "/usr/bin/ssh",
+        "/bin/ssh",
+    ]
+    for candidate in candidates:
+        if candidate and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _nix_sshopts() -> str:
+    ssh_options = [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+    ]
+    return " ".join(ssh_options)
+
+
 def _parse_nix_machine_line(line: str) -> Optional[_NixRemoteBuilder]:
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
@@ -728,7 +750,7 @@ def _select_nix_remote_builder(nix_system: str) -> Optional[_NixRemoteBuilder]:
 
 def _ssh_command(builder: _NixRemoteBuilder, remote_command: List[str]) -> List[str]:
     command = [
-        "ssh",
+        _ssh_binary() or "ssh",
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "BatchMode=yes",
@@ -761,9 +783,14 @@ def _remote_nix_copy_to_ecr(
         f"path:{tmp_dir}#{push_attr}",
     ]
     click.secho(f"Remote nix2container build on {builder.ssh_host}: {' '.join(build_command)}", fg="blue")
+    ssh_binary = _ssh_binary()
+    path = os.environ.get("PATH", "")
+    if ssh_binary:
+        path = f"{Path(ssh_binary).parent}{os.pathsep}{path}"
     build_env = {
         **os.environ,
-        "NIX_SSHOPTS": "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes",
+        "NIX_SSHOPTS": _nix_sshopts(),
+        "PATH": path,
     }
     build_result = run(build_command, capture_output=True, text=True, env=build_env)
     if build_result.returncode != 0:

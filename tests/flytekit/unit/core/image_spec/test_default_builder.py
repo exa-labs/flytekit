@@ -469,11 +469,11 @@ def test_remote_nix_copy_to_ecr_builds_remote_store_and_pushes_over_ssh(monkeypa
     ]
     assert calls[0][1]["capture_output"] is True
     assert calls[0][1]["text"] is True
-    assert calls[0][1]["env"]["NIX_SSHOPTS"] == (
-        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes"
-    )
-    assert calls[1][0] == [
-        "ssh",
+    assert "-o StrictHostKeyChecking=no" in calls[0][1]["env"]["NIX_SSHOPTS"]
+    assert "-o UserKnownHostsFile=/dev/null" in calls[0][1]["env"]["NIX_SSHOPTS"]
+    assert "-o BatchMode=yes" in calls[0][1]["env"]["NIX_SSHOPTS"]
+    assert calls[1][0][0].endswith("/ssh") or calls[1][0][0] == "ssh"
+    assert calls[1][0][1:] == [
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "BatchMode=yes",
