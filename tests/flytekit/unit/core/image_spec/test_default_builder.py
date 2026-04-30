@@ -287,9 +287,96 @@ def test_create_docker_context_uv_lock(monkeypatch, tmp_path):
     assert "uv pip install" not in dockerfile_content
     subprocess_run.assert_called_once()
     export_command = subprocess_run.call_args.args[0]
-    assert "uv export --format requirements-txt" in export_command
+    assert "uv export --frozen --format requirements-txt" in export_command
     assert f"> {docker_context_path / 'requirements.txt'}" in export_command
     assert subprocess_run.call_args.kwargs == {"shell": True, "check": True, "cwd": docker_context_path}
+
+
+def test_create_docker_context_uv_lock_with_local_editables_uses_frozen_export(monkeypatch, tmp_path):
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    (source_root / ".git").mkdir()
+    project_dir = source_root / "app"
+    project_dir.mkdir()
+    local_package_dir = source_root / "shared" / "local_package"
+    local_package_dir.mkdir(parents=True)
+    (local_package_dir / "local_package").mkdir()
+    (local_package_dir / "local_package" / "__init__.py").write_text("")
+    (local_package_dir / "pyproject.toml").write_text(
+        """
+[project]
+name = "local-package"
+version = "0.1.0"
+"""
+    )
+
+    (project_dir / "pyproject.toml").write_text(
+        """
+[project]
+name = "test-project"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["local-package"]
+
+[tool.uv.sources]
+local-package = { path = "../shared/local_package", editable = true }
+"""
+    )
+    uv_lock_file = project_dir / "uv.lock"
+    uv_lock_file.write_text(
+        """
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "local-package"
+version = "0.1.0"
+source = { editable = "../shared/local_package" }
+
+[[package]]
+name = "test-project"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "local-package" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "local-package", editable = "../shared/local_package" },
+]
+"""
+    )
+    docker_context_path = tmp_path / "builder_root"
+    docker_context_path.mkdir()
+    calls = []
+
+    def subprocess_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[0] == "git":
+            return SimpleNamespace(returncode=0, stdout=b"")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder.subprocess.run", subprocess_run)
+
+    image_spec = ImageSpec(
+        name="FLYTEKIT",
+        python_version="3.12",
+        requirements=os.fspath(uv_lock_file),
+        vendor_local=False,
+    )
+
+    with pytest.warns(UserWarning, match="uv.lock support is experimental"):
+        create_docker_context(image_spec, docker_context_path)
+
+    export_command = next(
+        command for command, _ in calls if isinstance(command, str) and command.startswith("uv export")
+    )
+    assert "uv export --frozen --format requirements-txt" in export_command
+    assert f"> {docker_context_path / 'requirements.txt'}" in export_command
+    assert 'editable = "local_packages/shared/local_package"' in (docker_context_path / "uv.lock").read_text()
+    assert 'path = "local_packages/shared/local_package"' in (docker_context_path / "pyproject.toml").read_text()
+    assert (docker_context_path / "local_packages" / "shared" / "local_package" / "pyproject.toml").exists()
 
 
 @pytest.mark.parametrize("lock_file", ["uv.lock", "poetry.lock"])
