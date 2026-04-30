@@ -431,6 +431,20 @@ def test_store_uri_with_ssh_key_uses_local_key():
     assert _store_uri_with_ssh_key(builder) == "ssh-ng://root@10.0.0.3?ssh-key=/home/runner/.ssh/nix-runner-key"
 
 
+def test_store_uri_with_ssh_key_replaces_embedded_key():
+    builder = _NixRemoteBuilder(
+        store_uri="ssh-ng://root@10.0.0.3?ssh-key=/root/.ssh/nix-runner-key&compress=true",
+        system="x86_64-linux",
+        ssh_host="root@10.0.0.3",
+        ssh_key="/home/runner/.ssh/nix-runner-key",
+    )
+
+    assert (
+        _store_uri_with_ssh_key(builder)
+        == "ssh-ng://root@10.0.0.3?ssh-key=/home/runner/.ssh/nix-runner-key&compress=true"
+    )
+
+
 def test_remote_nix_copy_to_ecr_builds_remote_store_and_pushes_over_ssh(monkeypatch):
     builder = _NixRemoteBuilder(
         store_uri="ssh-ng://root@10.0.0.4",

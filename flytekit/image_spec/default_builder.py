@@ -663,11 +663,24 @@ def _local_ssh_key_path(ssh_key: Optional[str]) -> Optional[str]:
 
 
 def _store_uri_with_ssh_key(builder: _NixRemoteBuilder) -> str:
-    if not builder.ssh_key or "ssh-key=" in builder.store_uri:
+    if not builder.ssh_key:
         return builder.store_uri
 
-    separator = "&" if "?" in builder.store_uri else "?"
-    return f"{builder.store_uri}{separator}ssh-key={builder.ssh_key}"
+    parsed_uri = urlparse(builder.store_uri)
+    query_parts = parsed_uri.query.split("&") if parsed_uri.query else []
+    next_query_parts = []
+    replaced_ssh_key = False
+    for query_part in query_parts:
+        if query_part.split("=", 1)[0] == "ssh-key":
+            next_query_parts.append(f"ssh-key={builder.ssh_key}")
+            replaced_ssh_key = True
+        else:
+            next_query_parts.append(query_part)
+
+    if not replaced_ssh_key:
+        next_query_parts.append(f"ssh-key={builder.ssh_key}")
+
+    return parsed_uri._replace(query="&".join(next_query_parts)).geturl()
 
 
 def _ssh_binary() -> Optional[str]:
