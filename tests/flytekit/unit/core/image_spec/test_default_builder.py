@@ -23,6 +23,33 @@ from flytekit.image_spec.default_builder import (
 )
 
 
+def _write_minimal_uv_project(tmp_path: Path) -> Path:
+    uv_lock_file = tmp_path / "uv.lock"
+    uv_lock_file.write_text(
+        """
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "flytekit"
+version = "1.0.0"
+"""
+    )
+
+    pyproject_file = tmp_path / "pyproject.toml"
+    pyproject_file.write_text(
+        """
+[project]
+name = "test-project"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+"""
+    )
+
+    return uv_lock_file
+
+
 def test_create_docker_context(tmp_path):
     docker_context_path = tmp_path / "builder_root"
     docker_context_path.mkdir()
@@ -216,13 +243,13 @@ def test_should_push_env(monkeypatch, push_image_spec):
     image_spec = ImageSpec(name="my_flytekit", python_version="3.12", registry="localhost:30000")
     monkeypatch.setenv("FLYTE_PUSH_IMAGE_SPEC", push_image_spec)
 
-    run_mock = Mock()
+    run_mock = Mock(return_value=SimpleNamespace(returncode=0, stderr=""))
     monkeypatch.setattr("flytekit.image_spec.default_builder.run", run_mock)
 
     builder = DefaultImageBuilder()
     builder.build_image(image_spec)
 
-    run_mock.assert_called_once()
+    assert run_mock.call_count == 2
     call_args = run_mock.call_args.args
 
     if push_image_spec == "0":
@@ -231,15 +258,12 @@ def test_should_push_env(monkeypatch, push_image_spec):
         assert "--push" in call_args[0]
 
 
-def test_create_docker_context_uv_lock(tmp_path):
+def test_create_docker_context_uv_lock(monkeypatch, tmp_path):
     docker_context_path = tmp_path / "builder_root"
     docker_context_path.mkdir()
 
-    uv_lock_file = tmp_path / "uv.lock"
-    uv_lock_file.write_text("this is a lock file")
-
-    pyproject_file = tmp_path / "pyproject.toml"
-    pyproject_file.write_text("this is a pyproject.toml file")
+    uv_lock_file = _write_minimal_uv_project(tmp_path)
+    subprocess_run = Mock(return_value=SimpleNamespace(returncode=0))
 
     image_spec = ImageSpec(
         name="FLYTEKIT",
@@ -251,6 +275,7 @@ def test_create_docker_context_uv_lock(tmp_path):
     )
 
     warning_msg = "uv.lock support is experimental"
+    monkeypatch.setattr("flytekit.image_spec.default_builder.subprocess.run", subprocess_run)
     with pytest.warns(UserWarning, match=warning_msg):
         create_docker_context(image_spec, docker_context_path)
 
@@ -258,11 +283,13 @@ def test_create_docker_context_uv_lock(tmp_path):
     assert dockerfile_path.exists()
     dockerfile_content = dockerfile_path.read_text()
 
-    assert (
-        "uv sync --index-url https://url.com --extra-index-url "
-        "https://extra-url.com --no-install-package library-to-skip "
-        "--locked --no-dev --no-install-project"
-    ) in dockerfile_content
+    assert "uv venv && uv pip sync requirements.txt" in dockerfile_content
+    assert "uv pip install" not in dockerfile_content
+    subprocess_run.assert_called_once()
+    export_command = subprocess_run.call_args.args[0]
+    assert "uv export --format requirements-txt" in export_command
+    assert f"> {docker_context_path / 'requirements.txt'}" in export_command
+    assert subprocess_run.call_args.kwargs == {"shell": True, "check": True, "cwd": docker_context_path}
 
 
 @pytest.mark.parametrize("lock_file", ["uv.lock", "poetry.lock"])
@@ -272,7 +299,11 @@ def test_lock_errors_no_pyproject_toml(monkeypatch, tmp_path, lock_file):
     monkeypatch.setattr("flytekit.image_spec.default_builder.run", run_mock)
 
     lock_file_path = tmp_path / lock_file
-    lock_file_path.write_text("this is a lock file")
+    if lock_file == "uv.lock":
+        lock_file_path = _write_minimal_uv_project(tmp_path)
+        (tmp_path / "pyproject.toml").unlink()
+    else:
+        lock_file_path.write_text("this is a lock file")
 
     image_spec = ImageSpec(
         name="FLYTEKIT",
@@ -282,7 +313,7 @@ def test_lock_errors_no_pyproject_toml(monkeypatch, tmp_path, lock_file):
 
     builder = DefaultImageBuilder()
 
-    with pytest.raises(ValueError, match="a pyproject.toml file must be in the same"):
+    with pytest.raises(ValueError, match="pyproject.toml must exist in the same directory"):
         builder.build_image(image_spec)
 
 
@@ -317,7 +348,15 @@ def test_create_poetry_lock(tmp_path):
     poetry_lock.write_text("this is a lock file")
 
     pyproject_file = tmp_path / "pyproject.toml"
-    pyproject_file.write_text("this is a pyproject.toml file")
+    pyproject_file.write_text(
+        """
+[tool.poetry]
+name = "test-project"
+version = "0.1.0"
+description = ""
+authors = []
+"""
+    )
 
     image_spec = ImageSpec(
         name="FLYTEKIT",

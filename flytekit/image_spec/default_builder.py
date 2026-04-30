@@ -236,6 +236,10 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
     # Copy each local package from the lock file and update its path
     for package in lock_data["package"]:
+        if "source" not in package:
+            non_vendored_packages.append(package)
+            continue
+
         source = package["source"]
 
         if "directory" in source:
@@ -487,7 +491,7 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
     # Export requirements from uv.lock to requirements.txt format
     # This excludes editable installs (-e) and local relative path dependencies
     requirements_export_cmd = rf"uv export --format requirements-txt {image_spec.uv_export_args} | grep -v '^\(-e\|\.\./\)' > {requirements_path}"
-    subprocess.run(requirements_export_cmd, shell=True, check=True)
+    subprocess.run(requirements_export_cmd, shell=True, check=True, cwd=tmp_dir)
 
     # Write local packages file
     local_packages_path = tmp_dir / "local_packages.txt"
@@ -499,8 +503,18 @@ def _copy_lock_files_into_context(image_spec: ImageSpec, lock_file: str, tmp_dir
         msg = f"Support for {lock_file} files and packages is mutually exclusive"
         raise ValueError(msg)
 
-    # Copy and update local packages first
-    _copy_local_packages_and_update_lock(image_spec, tmp_dir)
+    if lock_file == "uv.lock":
+        _copy_local_packages_and_update_lock(image_spec, tmp_dir)
+        return
+
+    lock_path = Path(image_spec.requirements)
+    lock_dir = lock_path.parent
+    pyproject_path = lock_dir / "pyproject.toml"
+    if not pyproject_path.exists():
+        raise ValueError(f"pyproject.toml must exist in the same directory as {lock_file}")
+
+    shutil.copy2(lock_path, tmp_dir / lock_file)
+    shutil.copy2(pyproject_path, tmp_dir / "pyproject.toml")
 
 
 def prepare_uv_lock_command(image_spec: ImageSpec, pip_install_args: List[str], tmp_dir: Path) -> str:
