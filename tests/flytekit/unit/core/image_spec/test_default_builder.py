@@ -1,15 +1,25 @@
-import re
 import os
-from unittest.mock import patch, Mock
+import re
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 import flytekit
-from flytekit.image_spec import ImageSpec
-from flytekit.image_spec.default_builder import DefaultImageBuilder, create_docker_context
 from flytekit.constants import CopyFileDetection
-from pathlib import Path
-import tempfile
+from flytekit.image_spec import ImageSpec
+from flytekit.image_spec.default_builder import (
+    DefaultImageBuilder,
+    _configured_nix_remote_builders,
+    _NixRemoteBuilder,
+    _parse_nix_machine_line,
+    _remote_nix_copy_to_ecr,
+    _store_uri_with_ssh_key,
+    create_docker_context,
+)
+
 
 def test_create_docker_context(tmp_path):
     docker_context_path = tmp_path / "builder_root"
@@ -358,3 +368,103 @@ def test_python_exec_errors(tmp_path, key, value):
     msg = f"{key} is not supported with python_exec"
     with pytest.raises(ValueError, match=msg):
         create_docker_context(image_spec, docker_context_path)
+
+
+def test_parse_nix_machine_line_uses_local_key_from_home(monkeypatch, tmp_path):
+    key_path = tmp_path / ".ssh" / "nix-runner-key"
+    key_path.parent.mkdir()
+    key_path.write_text("key")
+    monkeypatch.setenv("HOME", os.fspath(tmp_path))
+
+    builder = _parse_nix_machine_line(
+        "ssh-ng://root@10.0.0.1 x86_64-linux /root/.ssh/nix-runner-key 64 64 big-parallel,kvm - -"
+    )
+
+    assert builder
+    assert builder.store_uri == "ssh-ng://root@10.0.0.1"
+    assert builder.system == "x86_64-linux"
+    assert builder.ssh_host == "root@10.0.0.1"
+    assert builder.ssh_key == os.fspath(key_path)
+
+
+def test_configured_nix_remote_builders_from_nix_config(monkeypatch, tmp_path):
+    machine_path = tmp_path / "machines"
+    machine_path.write_text("ssh-ng://root@10.0.0.2 aarch64-linux - 64 64 big-parallel - -\n")
+    monkeypatch.setenv("NIX_CONFIG", f"builders = @{machine_path}")
+    monkeypatch.delenv("FLYTEKIT_NIX_REMOTE_BUILDERS", raising=False)
+    monkeypatch.delenv("FLYTEKIT_NIX_REMOTE_BUILDERS_FILE", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(tmp_path / "empty-config"))
+
+    builders = _configured_nix_remote_builders()
+
+    assert len(builders) == 1
+    assert builders[0].store_uri == "ssh-ng://root@10.0.0.2"
+    assert builders[0].system == "aarch64-linux"
+    assert builders[0].ssh_host == "root@10.0.0.2"
+    assert builders[0].ssh_key is None
+
+
+def test_store_uri_with_ssh_key_uses_local_key():
+    builder = _NixRemoteBuilder(
+        store_uri="ssh-ng://root@10.0.0.3",
+        system="x86_64-linux",
+        ssh_host="root@10.0.0.3",
+        ssh_key="/home/runner/.ssh/nix-runner-key",
+    )
+
+    assert _store_uri_with_ssh_key(builder) == "ssh-ng://root@10.0.0.3?ssh-key=/home/runner/.ssh/nix-runner-key"
+
+
+def test_remote_nix_copy_to_ecr_builds_remote_store_and_pushes_over_ssh(monkeypatch):
+    builder = _NixRemoteBuilder(
+        store_uri="ssh-ng://root@10.0.0.4",
+        system="x86_64-linux",
+        ssh_host="root@10.0.0.4",
+        ssh_key="/home/runner/.ssh/nix-runner-key",
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[0] == "nix":
+            return SimpleNamespace(returncode=0, stdout="/nix/store/copy-to\n", stderr="")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", fake_run)
+
+    _remote_nix_copy_to_ecr(
+        tmp_dir="/build-context",
+        nix_system="x86_64-linux",
+        image_name="472386928882.dkr.ecr.us-west-2.amazonaws.com/example:tag",
+        ecr_token="secret-token",
+        builder=builder,
+    )
+
+    assert calls[0][0] == [
+        "nix", "build",
+        "--no-link",
+        "--print-out-paths",
+        "--eval-store", "auto",
+        "--store", "ssh-ng://root@10.0.0.4?ssh-key=/home/runner/.ssh/nix-runner-key",
+        "--builders", "",
+        "--builders-use-substitutes",
+        "--system", "x86_64-linux",
+        "path:/build-context#packages.x86_64-linux.push-to-ecr",
+    ]
+    assert calls[0][1]["capture_output"] is True
+    assert calls[0][1]["text"] is True
+    assert calls[0][1]["env"]["NIX_SSHOPTS"] == (
+        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes"
+    )
+    assert calls[1][0] == [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-i", "/home/runner/.ssh/nix-runner-key",
+        "root@10.0.0.4",
+        "env",
+        "IMAGE_NAME=472386928882.dkr.ecr.us-west-2.amazonaws.com/example:tag",
+        "ECR_TOKEN=secret-token",
+        "/nix/store/copy-to/bin/push-to-ecr",
+    ]
