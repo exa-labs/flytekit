@@ -1,5 +1,6 @@
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -498,3 +499,177 @@ def test_remote_nix_copy_to_ecr_builds_remote_store_and_pushes_over_ssh(monkeypa
         "ECR_TOKEN=secret-token",
         "/nix/store/copy-to/bin/push-to-ecr",
     ]
+
+
+def _simple_nix_image_spec(platform_value="linux/amd64"):
+    return ImageSpec(
+        name="remote-nix-test",
+        registry="472386928882.dkr.ecr.us-west-2.amazonaws.com/flytekit-tests",
+        nix=True,
+        platform=platform_value,
+    )
+
+
+def _patch_nix_builder_basics(monkeypatch, *, machine="x86_64", system="Linux", aws_token="secret-token"):
+    monkeypatch.setattr("flytekit.image_spec.default_builder.create_docker_context", lambda image_spec, tmp_path: None)
+    monkeypatch.setattr(
+        "flytekit.image_spec.default_builder.shutil.which",
+        lambda binary: "/usr/bin/nix" if binary == "nix" else None,
+    )
+    monkeypatch.setattr("flytekit.image_spec.default_builder.platform.system", lambda: system)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.platform.machine", lambda: machine)
+
+    aws_run = Mock(return_value=SimpleNamespace(stdout=f"{aws_token}\n"))
+    monkeypatch.setattr("flytekit.image_spec.default_builder.subprocess.run", aws_run)
+    return aws_run
+
+
+def test_build_image_with_remote_nix_builder_pushes_from_remote_store(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    builder = _NixRemoteBuilder(
+        store_uri="ssh-ng://root@10.0.0.10",
+        system="x86_64-linux",
+        ssh_host="root@10.0.0.10",
+        ssh_key="/home/runner/.ssh/nix-runner-key",
+    )
+    aws_run = _patch_nix_builder_basics(monkeypatch)
+    local_run = Mock(return_value=SimpleNamespace(returncode=0))
+    remote_calls = []
+
+    def fake_remote_nix_copy_to_ecr(**kwargs):
+        remote_calls.append(kwargs)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder._select_nix_remote_builder", lambda nix_system: builder)
+    monkeypatch.setattr("flytekit.image_spec.default_builder._remote_nix_copy_to_ecr", fake_remote_nix_copy_to_ecr)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", local_run)
+
+    result = DefaultImageBuilder()._build_image(image_spec, push=True)
+
+    assert result == image_spec.image_name()
+    aws_run.assert_called_once_with(
+        ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert len(remote_calls) == 1
+    assert remote_calls[0]["nix_system"] == "x86_64-linux"
+    assert remote_calls[0]["image_name"] == image_spec.image_name()
+    assert remote_calls[0]["ecr_token"] == "secret-token"
+    assert remote_calls[0]["builder"] == builder
+    local_run.assert_not_called()
+
+
+def test_build_image_without_remote_nix_builder_falls_back_to_local_copyto(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    _patch_nix_builder_basics(monkeypatch)
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder._select_nix_remote_builder", lambda nix_system: None)
+    remote_push = Mock()
+    monkeypatch.setattr("flytekit.image_spec.default_builder._remote_nix_copy_to_ecr", remote_push)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", fake_run)
+
+    result = DefaultImageBuilder()._build_image(image_spec, push=True)
+
+    assert result == image_spec.image_name()
+    assert len(commands) == 1
+    command = commands[0][0]
+    assert command[:2] == ["nix", "run"]
+    assert command[2].startswith("path:")
+    assert command[2].endswith("#packages.x86_64-linux.docker.copyTo")
+    assert command[3:] == [
+        "--",
+        f"docker://{image_spec.image_name()}",
+        "--dest-creds",
+        "AWS:secret-token",
+        "--image-parallel-copies",
+        "32",
+    ]
+    remote_push.assert_not_called()
+
+
+def test_build_image_without_remote_nix_builder_cross_builds_locally(monkeypatch):
+    image_spec = _simple_nix_image_spec(platform_value="linux/arm64")
+    _patch_nix_builder_basics(monkeypatch, machine="x86_64")
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder._select_nix_remote_builder", lambda nix_system: None)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", fake_run)
+
+    result = DefaultImageBuilder()._build_image(image_spec, push=True)
+
+    assert result == image_spec.image_name()
+    assert len(commands) == 1
+    command = commands[0][0]
+    assert command[:2] == ["nix", "run"]
+    assert command[2].startswith("path:")
+    assert command[2].endswith("#packages.x86_64-linux.docker-aarch64-linux.copyTo")
+    assert command[3:] == [
+        "--",
+        f"docker://{image_spec.image_name()}",
+        "--dest-creds",
+        "AWS:secret-token",
+        "--image-parallel-copies",
+        "32",
+    ]
+
+
+def test_build_image_nix_without_push_builds_local_docker_package(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    aws_run = _patch_nix_builder_basics(monkeypatch)
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder._select_nix_remote_builder", Mock())
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", fake_run)
+
+    result = DefaultImageBuilder()._build_image(image_spec, push=False)
+
+    assert result == image_spec.image_name()
+    aws_run.assert_not_called()
+    assert len(commands) == 1
+    command = commands[0][0]
+    assert command[:2] == ["nix", "build"]
+    assert command[2].startswith("path:")
+    assert command[2].endswith("#packages.x86_64-linux.docker")
+
+
+def test_build_image_nix_errors_when_nix_is_missing(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    monkeypatch.setattr("flytekit.image_spec.default_builder.create_docker_context", lambda image_spec, tmp_path: None)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.shutil.which", lambda binary: None)
+
+    with pytest.raises(RuntimeError, match="Nix is not installed"):
+        DefaultImageBuilder()._build_image(image_spec, push=True)
+
+
+def test_build_image_nix_errors_on_unsupported_platform(monkeypatch):
+    image_spec = _simple_nix_image_spec(platform_value="linux/riscv64")
+    aws_run = _patch_nix_builder_basics(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="Unsupported platform for nix builds: linux/riscv64"):
+        DefaultImageBuilder()._build_image(image_spec, push=True)
+
+    aws_run.assert_not_called()
+
+
+def test_build_image_nix_propagates_ecr_token_failure(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    _patch_nix_builder_basics(monkeypatch)
+    aws_error = subprocess.CalledProcessError(returncode=1, cmd=["aws", "ecr", "get-login-password"])
+    monkeypatch.setattr("flytekit.image_spec.default_builder.subprocess.run", Mock(side_effect=aws_error))
+
+    with pytest.raises(subprocess.CalledProcessError):
+        DefaultImageBuilder()._build_image(image_spec, push=True)
