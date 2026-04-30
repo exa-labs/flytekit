@@ -1,15 +1,54 @@
-import re
 import os
-from unittest.mock import patch, Mock
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 import flytekit
-from flytekit.image_spec import ImageSpec
-from flytekit.image_spec.default_builder import DefaultImageBuilder, create_docker_context
 from flytekit.constants import CopyFileDetection
-from pathlib import Path
-import tempfile
+from flytekit.image_spec import ImageSpec
+from flytekit.image_spec.default_builder import (
+    DefaultImageBuilder,
+    _configured_nix_remote_builders,
+    _NixRemoteBuilder,
+    _parse_nix_machine_line,
+    _remote_nix_copy_to_ecr,
+    _select_nix_remote_builder,
+    _store_uri_with_ssh_key,
+    create_docker_context,
+)
+
+
+def _write_minimal_uv_project(tmp_path: Path) -> Path:
+    uv_lock_file = tmp_path / "uv.lock"
+    uv_lock_file.write_text(
+        """
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "flytekit"
+version = "1.0.0"
+"""
+    )
+
+    pyproject_file = tmp_path / "pyproject.toml"
+    pyproject_file.write_text(
+        """
+[project]
+name = "test-project"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+"""
+    )
+
+    return uv_lock_file
+
 
 def test_create_docker_context(tmp_path):
     docker_context_path = tmp_path / "builder_root"
@@ -204,13 +243,13 @@ def test_should_push_env(monkeypatch, push_image_spec):
     image_spec = ImageSpec(name="my_flytekit", python_version="3.12", registry="localhost:30000")
     monkeypatch.setenv("FLYTE_PUSH_IMAGE_SPEC", push_image_spec)
 
-    run_mock = Mock()
+    run_mock = Mock(return_value=SimpleNamespace(returncode=0, stderr=""))
     monkeypatch.setattr("flytekit.image_spec.default_builder.run", run_mock)
 
     builder = DefaultImageBuilder()
     builder.build_image(image_spec)
 
-    run_mock.assert_called_once()
+    assert run_mock.call_count == 2
     call_args = run_mock.call_args.args
 
     if push_image_spec == "0":
@@ -219,15 +258,12 @@ def test_should_push_env(monkeypatch, push_image_spec):
         assert "--push" in call_args[0]
 
 
-def test_create_docker_context_uv_lock(tmp_path):
+def test_create_docker_context_uv_lock(monkeypatch, tmp_path):
     docker_context_path = tmp_path / "builder_root"
     docker_context_path.mkdir()
 
-    uv_lock_file = tmp_path / "uv.lock"
-    uv_lock_file.write_text("this is a lock file")
-
-    pyproject_file = tmp_path / "pyproject.toml"
-    pyproject_file.write_text("this is a pyproject.toml file")
+    uv_lock_file = _write_minimal_uv_project(tmp_path)
+    subprocess_run = Mock(return_value=SimpleNamespace(returncode=0))
 
     image_spec = ImageSpec(
         name="FLYTEKIT",
@@ -239,6 +275,7 @@ def test_create_docker_context_uv_lock(tmp_path):
     )
 
     warning_msg = "uv.lock support is experimental"
+    monkeypatch.setattr("flytekit.image_spec.default_builder.subprocess.run", subprocess_run)
     with pytest.warns(UserWarning, match=warning_msg):
         create_docker_context(image_spec, docker_context_path)
 
@@ -246,11 +283,100 @@ def test_create_docker_context_uv_lock(tmp_path):
     assert dockerfile_path.exists()
     dockerfile_content = dockerfile_path.read_text()
 
-    assert (
-        "uv sync --index-url https://url.com --extra-index-url "
-        "https://extra-url.com --no-install-package library-to-skip "
-        "--locked --no-dev --no-install-project"
-    ) in dockerfile_content
+    assert "uv venv && uv pip sync requirements.txt" in dockerfile_content
+    assert "uv pip install" not in dockerfile_content
+    subprocess_run.assert_called_once()
+    export_command = subprocess_run.call_args.args[0]
+    assert "uv export --frozen --format requirements-txt" in export_command
+    assert f"> {docker_context_path / 'requirements.txt'}" in export_command
+    assert subprocess_run.call_args.kwargs == {"shell": True, "check": True, "cwd": docker_context_path}
+
+
+def test_create_docker_context_uv_lock_with_local_editables_uses_frozen_export(monkeypatch, tmp_path):
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    (source_root / ".git").mkdir()
+    project_dir = source_root / "app"
+    project_dir.mkdir()
+    local_package_dir = source_root / "shared" / "local_package"
+    local_package_dir.mkdir(parents=True)
+    (local_package_dir / "local_package").mkdir()
+    (local_package_dir / "local_package" / "__init__.py").write_text("")
+    (local_package_dir / "pyproject.toml").write_text(
+        """
+[project]
+name = "local-package"
+version = "0.1.0"
+"""
+    )
+
+    (project_dir / "pyproject.toml").write_text(
+        """
+[project]
+name = "test-project"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["local-package"]
+
+[tool.uv.sources]
+local-package = { path = "../shared/local_package", editable = true }
+"""
+    )
+    uv_lock_file = project_dir / "uv.lock"
+    uv_lock_file.write_text(
+        """
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "local-package"
+version = "0.1.0"
+source = { editable = "../shared/local_package" }
+
+[[package]]
+name = "test-project"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "local-package" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "local-package", editable = "../shared/local_package" },
+]
+"""
+    )
+    docker_context_path = tmp_path / "builder_root"
+    docker_context_path.mkdir()
+    calls = []
+
+    def subprocess_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[0] == "git":
+            return SimpleNamespace(returncode=0, stdout=b"")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder.subprocess.run", subprocess_run)
+
+    image_spec = ImageSpec(
+        name="FLYTEKIT",
+        python_version="3.12",
+        requirements=os.fspath(uv_lock_file),
+        vendor_local=False,
+    )
+
+    with pytest.warns(UserWarning, match="uv.lock support is experimental"):
+        create_docker_context(image_spec, docker_context_path)
+
+    export_command = next(
+        command for command, _ in calls if isinstance(command, str) and command.startswith("uv export")
+    )
+    assert "uv export --frozen --format requirements-txt" in export_command
+    assert f"> {docker_context_path / 'requirements.txt'}" in export_command
+    assert 'editable = "local_packages/shared/local_package"' in (docker_context_path / "uv.lock").read_text()
+    assert 'path = "local_packages/shared/local_package"' in (docker_context_path / "pyproject.toml").read_text()
+    assert (docker_context_path / "local_packages" / "shared" / "local_package" / "pyproject.toml").exists()
 
 
 @pytest.mark.parametrize("lock_file", ["uv.lock", "poetry.lock"])
@@ -260,7 +386,11 @@ def test_lock_errors_no_pyproject_toml(monkeypatch, tmp_path, lock_file):
     monkeypatch.setattr("flytekit.image_spec.default_builder.run", run_mock)
 
     lock_file_path = tmp_path / lock_file
-    lock_file_path.write_text("this is a lock file")
+    if lock_file == "uv.lock":
+        lock_file_path = _write_minimal_uv_project(tmp_path)
+        (tmp_path / "pyproject.toml").unlink()
+    else:
+        lock_file_path.write_text("this is a lock file")
 
     image_spec = ImageSpec(
         name="FLYTEKIT",
@@ -270,7 +400,7 @@ def test_lock_errors_no_pyproject_toml(monkeypatch, tmp_path, lock_file):
 
     builder = DefaultImageBuilder()
 
-    with pytest.raises(ValueError, match="a pyproject.toml file must be in the same"):
+    with pytest.raises(ValueError, match="pyproject.toml must exist in the same directory"):
         builder.build_image(image_spec)
 
 
@@ -305,7 +435,15 @@ def test_create_poetry_lock(tmp_path):
     poetry_lock.write_text("this is a lock file")
 
     pyproject_file = tmp_path / "pyproject.toml"
-    pyproject_file.write_text("this is a pyproject.toml file")
+    pyproject_file.write_text(
+        """
+[tool.poetry]
+name = "test-project"
+version = "0.1.0"
+description = ""
+authors = []
+"""
+    )
 
     image_spec = ImageSpec(
         name="FLYTEKIT",
@@ -358,3 +496,306 @@ def test_python_exec_errors(tmp_path, key, value):
     msg = f"{key} is not supported with python_exec"
     with pytest.raises(ValueError, match=msg):
         create_docker_context(image_spec, docker_context_path)
+
+
+def test_parse_nix_machine_line_uses_local_key_from_home(monkeypatch, tmp_path):
+    key_path = tmp_path / ".ssh" / "nix-runner-key"
+    key_path.parent.mkdir()
+    key_path.write_text("key")
+    monkeypatch.setenv("HOME", os.fspath(tmp_path))
+
+    builder = _parse_nix_machine_line(
+        "ssh-ng://root@10.0.0.1 x86_64-linux /root/.ssh/nix-runner-key 64 64 big-parallel,kvm - -"
+    )
+
+    assert builder
+    assert builder.store_uri == "ssh-ng://root@10.0.0.1"
+    assert builder.system == "x86_64-linux"
+    assert builder.ssh_host == "root@10.0.0.1"
+    assert builder.ssh_key == os.fspath(key_path)
+
+
+def test_configured_nix_remote_builders_from_nix_config(monkeypatch, tmp_path):
+    machine_path = tmp_path / "machines"
+    machine_path.write_text("ssh-ng://root@10.0.0.2 aarch64-linux - 64 64 big-parallel - -\n")
+    monkeypatch.setenv("NIX_CONFIG", f"builders = @{machine_path}")
+    monkeypatch.delenv("FLYTEKIT_NIX_REMOTE_BUILDERS", raising=False)
+    monkeypatch.delenv("FLYTEKIT_NIX_REMOTE_BUILDERS_FILE", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(tmp_path / "empty-config"))
+
+    builders = _configured_nix_remote_builders()
+
+    assert len(builders) == 1
+    assert builders[0].store_uri == "ssh-ng://root@10.0.0.2"
+    assert builders[0].system == "aarch64-linux"
+    assert builders[0].ssh_host == "root@10.0.0.2"
+    assert builders[0].ssh_key is None
+
+
+def test_select_nix_remote_builder_matches_comma_separated_systems(monkeypatch):
+    monkeypatch.setenv(
+        "FLYTEKIT_NIX_REMOTE_BUILDERS",
+        "ssh-ng://root@10.0.0.5 x86_64-linux,aarch64-linux - 64 64 big-parallel - -",
+    )
+    monkeypatch.delenv("FLYTEKIT_NIX_REMOTE_BUILDERS_FILE", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(Path.cwd() / "missing-config"))
+
+    builder = _select_nix_remote_builder("aarch64-linux")
+
+    assert builder
+    assert builder.store_uri == "ssh-ng://root@10.0.0.5"
+    assert builder.system == "x86_64-linux,aarch64-linux"
+
+
+def test_store_uri_with_ssh_key_uses_local_key():
+    builder = _NixRemoteBuilder(
+        store_uri="ssh-ng://root@10.0.0.3",
+        system="x86_64-linux",
+        ssh_host="root@10.0.0.3",
+        ssh_key="/home/runner/.ssh/nix-runner-key",
+    )
+
+    assert _store_uri_with_ssh_key(builder) == "ssh-ng://root@10.0.0.3?ssh-key=/home/runner/.ssh/nix-runner-key"
+
+
+def test_store_uri_with_ssh_key_replaces_embedded_key():
+    builder = _NixRemoteBuilder(
+        store_uri="ssh-ng://root@10.0.0.3?ssh-key=/root/.ssh/nix-runner-key&compress=true",
+        system="x86_64-linux",
+        ssh_host="root@10.0.0.3",
+        ssh_key="/home/runner/.ssh/nix-runner-key",
+    )
+
+    assert (
+        _store_uri_with_ssh_key(builder)
+        == "ssh-ng://root@10.0.0.3?ssh-key=/home/runner/.ssh/nix-runner-key&compress=true"
+    )
+
+
+def test_remote_nix_copy_to_ecr_builds_remote_store_and_pushes_over_ssh(monkeypatch):
+    builder = _NixRemoteBuilder(
+        store_uri="ssh-ng://root@10.0.0.4",
+        system="x86_64-linux",
+        ssh_host="root@10.0.0.4",
+        ssh_key="/home/runner/.ssh/nix-runner-key",
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[0] == "nix":
+            return SimpleNamespace(returncode=0, stdout="/nix/store/copy-to\n", stderr="")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", fake_run)
+
+    _remote_nix_copy_to_ecr(
+        tmp_dir="/build-context",
+        nix_system="x86_64-linux",
+        image_name="472386928882.dkr.ecr.us-west-2.amazonaws.com/example:tag",
+        ecr_token="secret-token",
+        builder=builder,
+    )
+
+    assert calls[0][0] == [
+        "nix", "build",
+        "--no-link",
+        "--print-out-paths",
+        "--eval-store", "auto",
+        "--store", "ssh-ng://root@10.0.0.4?ssh-key=/home/runner/.ssh/nix-runner-key",
+        "--builders", "",
+        "--builders-use-substitutes",
+        "--system", "x86_64-linux",
+        "path:/build-context#packages.x86_64-linux.push-to-ecr",
+    ]
+    assert calls[0][1]["capture_output"] is True
+    assert calls[0][1]["text"] is True
+    assert "-o StrictHostKeyChecking=no" in calls[0][1]["env"]["NIX_SSHOPTS"]
+    assert "-o UserKnownHostsFile=/dev/null" in calls[0][1]["env"]["NIX_SSHOPTS"]
+    assert "-o BatchMode=yes" in calls[0][1]["env"]["NIX_SSHOPTS"]
+    assert calls[1][0][0].endswith("/ssh") or calls[1][0][0] == "ssh"
+    assert calls[1][0][1:] == [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-i", "/home/runner/.ssh/nix-runner-key",
+        "root@10.0.0.4",
+        "env",
+        "IMAGE_NAME=472386928882.dkr.ecr.us-west-2.amazonaws.com/example:tag",
+        "ECR_TOKEN=secret-token",
+        "/nix/store/copy-to/bin/push-to-ecr",
+    ]
+
+
+def _simple_nix_image_spec(platform_value="linux/amd64"):
+    return ImageSpec(
+        name="remote-nix-test",
+        registry="472386928882.dkr.ecr.us-west-2.amazonaws.com/flytekit-tests",
+        nix=True,
+        platform=platform_value,
+    )
+
+
+def _patch_nix_builder_basics(monkeypatch, *, machine="x86_64", system="Linux", aws_token="secret-token"):
+    monkeypatch.setattr("flytekit.image_spec.default_builder.create_docker_context", lambda image_spec, tmp_path: None)
+    monkeypatch.setattr(
+        "flytekit.image_spec.default_builder.shutil.which",
+        lambda binary: "/usr/bin/nix" if binary == "nix" else None,
+    )
+    monkeypatch.setattr("flytekit.image_spec.default_builder.platform.system", lambda: system)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.platform.machine", lambda: machine)
+
+    aws_run = Mock(return_value=SimpleNamespace(stdout=f"{aws_token}\n"))
+    monkeypatch.setattr("flytekit.image_spec.default_builder.subprocess.run", aws_run)
+    return aws_run
+
+
+def test_build_image_with_remote_nix_builder_pushes_from_remote_store(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    builder = _NixRemoteBuilder(
+        store_uri="ssh-ng://root@10.0.0.10",
+        system="x86_64-linux",
+        ssh_host="root@10.0.0.10",
+        ssh_key="/home/runner/.ssh/nix-runner-key",
+    )
+    aws_run = _patch_nix_builder_basics(monkeypatch)
+    local_run = Mock(return_value=SimpleNamespace(returncode=0))
+    remote_calls = []
+
+    def fake_remote_nix_copy_to_ecr(**kwargs):
+        remote_calls.append(kwargs)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder._select_nix_remote_builder", lambda nix_system: builder)
+    monkeypatch.setattr("flytekit.image_spec.default_builder._remote_nix_copy_to_ecr", fake_remote_nix_copy_to_ecr)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", local_run)
+
+    result = DefaultImageBuilder()._build_image(image_spec, push=True)
+
+    assert result == image_spec.image_name()
+    aws_run.assert_called_once_with(
+        ["aws", "ecr", "get-login-password", "--region", "us-west-2"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert len(remote_calls) == 1
+    assert remote_calls[0]["nix_system"] == "x86_64-linux"
+    assert remote_calls[0]["image_name"] == image_spec.image_name()
+    assert remote_calls[0]["ecr_token"] == "secret-token"
+    assert remote_calls[0]["builder"] == builder
+    local_run.assert_not_called()
+
+
+def test_build_image_without_remote_nix_builder_falls_back_to_local_copyto(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    _patch_nix_builder_basics(monkeypatch)
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder._select_nix_remote_builder", lambda nix_system: None)
+    remote_push = Mock()
+    monkeypatch.setattr("flytekit.image_spec.default_builder._remote_nix_copy_to_ecr", remote_push)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", fake_run)
+
+    result = DefaultImageBuilder()._build_image(image_spec, push=True)
+
+    assert result == image_spec.image_name()
+    assert len(commands) == 1
+    command = commands[0][0]
+    assert command[:2] == ["nix", "run"]
+    assert command[2].startswith("path:")
+    assert command[2].endswith("#packages.x86_64-linux.docker.copyTo")
+    assert command[3:] == [
+        "--",
+        f"docker://{image_spec.image_name()}",
+        "--dest-creds",
+        "AWS:secret-token",
+        "--image-parallel-copies",
+        "32",
+    ]
+    remote_push.assert_not_called()
+
+
+def test_build_image_without_remote_nix_builder_cross_builds_locally(monkeypatch):
+    image_spec = _simple_nix_image_spec(platform_value="linux/arm64")
+    _patch_nix_builder_basics(monkeypatch, machine="x86_64")
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder._select_nix_remote_builder", lambda nix_system: None)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", fake_run)
+
+    result = DefaultImageBuilder()._build_image(image_spec, push=True)
+
+    assert result == image_spec.image_name()
+    assert len(commands) == 1
+    command = commands[0][0]
+    assert command[:2] == ["nix", "run"]
+    assert command[2].startswith("path:")
+    assert command[2].endswith("#packages.x86_64-linux.docker-aarch64-linux.copyTo")
+    assert command[3:] == [
+        "--",
+        f"docker://{image_spec.image_name()}",
+        "--dest-creds",
+        "AWS:secret-token",
+        "--image-parallel-copies",
+        "32",
+    ]
+
+
+def test_build_image_nix_without_push_builds_local_docker_package(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    aws_run = _patch_nix_builder_basics(monkeypatch)
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("flytekit.image_spec.default_builder._select_nix_remote_builder", Mock())
+    monkeypatch.setattr("flytekit.image_spec.default_builder.run", fake_run)
+
+    result = DefaultImageBuilder()._build_image(image_spec, push=False)
+
+    assert result == image_spec.image_name()
+    aws_run.assert_not_called()
+    assert len(commands) == 1
+    command = commands[0][0]
+    assert command[:2] == ["nix", "build"]
+    assert command[2].startswith("path:")
+    assert command[2].endswith("#packages.x86_64-linux.docker")
+
+
+def test_build_image_nix_errors_when_nix_is_missing(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    monkeypatch.setattr("flytekit.image_spec.default_builder.create_docker_context", lambda image_spec, tmp_path: None)
+    monkeypatch.setattr("flytekit.image_spec.default_builder.shutil.which", lambda binary: None)
+
+    with pytest.raises(RuntimeError, match="Nix is not installed"):
+        DefaultImageBuilder()._build_image(image_spec, push=True)
+
+
+def test_build_image_nix_errors_on_unsupported_platform(monkeypatch):
+    image_spec = _simple_nix_image_spec(platform_value="linux/riscv64")
+    aws_run = _patch_nix_builder_basics(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="Unsupported platform for nix builds: linux/riscv64"):
+        DefaultImageBuilder()._build_image(image_spec, push=True)
+
+    aws_run.assert_not_called()
+
+
+def test_build_image_nix_propagates_ecr_token_failure(monkeypatch):
+    image_spec = _simple_nix_image_spec()
+    _patch_nix_builder_basics(monkeypatch)
+    aws_error = subprocess.CalledProcessError(returncode=1, cmd=["aws", "ecr", "get-login-password"])
+    monkeypatch.setattr("flytekit.image_spec.default_builder.subprocess.run", Mock(side_effect=aws_error))
+
+    with pytest.raises(subprocess.CalledProcessError):
+        DefaultImageBuilder()._build_image(image_spec, push=True)
