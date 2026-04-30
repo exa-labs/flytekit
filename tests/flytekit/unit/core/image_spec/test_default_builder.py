@@ -16,6 +16,7 @@ from flytekit.image_spec.default_builder import (
     _NixRemoteBuilder,
     _parse_nix_machine_line,
     _remote_nix_copy_to_ecr,
+    _select_nix_remote_builder,
     _store_uri_with_ssh_key,
     create_docker_context,
 )
@@ -402,6 +403,21 @@ def test_configured_nix_remote_builders_from_nix_config(monkeypatch, tmp_path):
     assert builders[0].system == "aarch64-linux"
     assert builders[0].ssh_host == "root@10.0.0.2"
     assert builders[0].ssh_key is None
+
+
+def test_select_nix_remote_builder_matches_comma_separated_systems(monkeypatch):
+    monkeypatch.setenv(
+        "FLYTEKIT_NIX_REMOTE_BUILDERS",
+        "ssh-ng://root@10.0.0.5 x86_64-linux,aarch64-linux - 64 64 big-parallel - -",
+    )
+    monkeypatch.delenv("FLYTEKIT_NIX_REMOTE_BUILDERS_FILE", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(Path.cwd() / "missing-config"))
+
+    builder = _select_nix_remote_builder("aarch64-linux")
+
+    assert builder
+    assert builder.store_uri == "ssh-ng://root@10.0.0.5"
+    assert builder.system == "x86_64-linux,aarch64-linux"
 
 
 def test_store_uri_with_ssh_key_uses_local_key():

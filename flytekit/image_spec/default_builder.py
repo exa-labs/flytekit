@@ -721,7 +721,7 @@ def _select_nix_remote_builder(nix_system: str) -> Optional[_NixRemoteBuilder]:
         return None
 
     for builder in _configured_nix_remote_builders():
-        if builder.system == nix_system:
+        if nix_system in builder.system.split(","):
             return builder
     return None
 
