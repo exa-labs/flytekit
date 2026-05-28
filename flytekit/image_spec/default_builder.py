@@ -182,6 +182,7 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
         --extra-conf "max-substitution-jobs = 256" \
         --extra-conf "http-connections = 256" \
         --extra-conf "download-buffer-size = 1073741824" \
+        --extra-conf "ssl-cert-file = /etc/ssl/certs/ca-certificates.crt" \
         --init none \
         --no-confirm
 
@@ -189,10 +190,14 @@ RUN --mount=type=cache,target=/nix,id=nix-determinate \
 WORKDIR /build
 
 # Build with cache mount - reuses the same cache across builds
+# NIX_SSL_CERT_FILE tells the nix daemon's fetcher where to find CA
+# certificates so fetchurl/FOD downloads can verify TLS.  The
+# ca-certificates package (installed above via apt) provides the bundle.
 RUN --mount=type=bind,source=.,target=/build/ \
     --mount=type=cache,target=/nix,id=nix-determinate \
     --mount=type=cache,target=/root/.cache/nix,id=nix-git-cache \
     --mount=type=cache,target=/var/lib/containers/cache,id=container-cache \
+    export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt && \
     . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
     nix run .#docker.copyTo -- docker://$IMAGE_NAME --dest-creds "AWS:$ECR_TOKEN" \
     --image-parallel-copies 32 \
