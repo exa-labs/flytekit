@@ -10,6 +10,7 @@ from flytekit.clients.auth.authenticator import (
     CommandAuthenticator,
     DeviceCodeAuthenticator,
     PKCEAuthenticator,
+    STSAuthenticator,
     StaticClientConfigStore,
 )
 from flytekit.clients.auth.exceptions import AuthenticationError, AccessTokenNotFoundError
@@ -66,6 +67,33 @@ def test_command_authenticator(mock_subprocess: MagicMock):
 
     with pytest.raises(AuthenticationError):
         authn.refresh_credentials()
+
+
+@patch("flytekit.clients.auth.aws_sts.resolve_aws_credentials")
+def test_sts_authenticator_mints_fresh_token_per_call(mock_resolve: MagicMock):
+    mock_resolve.return_value = ("AKIA", "secret", "session")
+    authn = STSAuthenticator(ENDPOINT)
+
+    header_key, value = authn.fetch_grpc_call_auth_metadata()
+    assert header_key == "authorization"
+    assert value.startswith("Bearer ")
+    # AWS credentials are resolved once and cached on the instance.
+    authn.fetch_grpc_call_auth_metadata()
+    mock_resolve.assert_called_once()
+
+
+@patch("flytekit.clients.auth.aws_sts.resolve_aws_credentials")
+def test_sts_authenticator_refresh_reresolves_credentials(mock_resolve: MagicMock):
+    mock_resolve.return_value = ("AKIA", "secret", None)
+    authn = STSAuthenticator(ENDPOINT)
+
+    authn.fetch_grpc_call_auth_metadata()
+    assert mock_resolve.call_count == 1
+
+    # refresh_credentials drops the cache so rotated credentials are picked up.
+    authn.refresh_credentials()
+    assert authn._creds is not None
+    assert mock_resolve.call_count == 2
 
 
 @patch("flytekit.clients.auth.token_client.requests.Session")

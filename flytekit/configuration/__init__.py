@@ -387,6 +387,9 @@ class AuthType(enum.Enum):
     BASIC = "basic"
     CLIENT_CREDENTIALS = "client_credentials"
     EXTERNAL_PROCESS = "external_process"
+    # Authenticate with an AWS STS presigned ``GetCallerIdentity`` URL as the
+    # bearer token, for Admin proxies that validate an AWS identity.
+    STS = "sts"
     # The following values are copied from flyteidl's admin client to align the two code bases on the same enum values.
     # The enum values above will continue to work.
     CLIENTSECRET = "ClientSecret"

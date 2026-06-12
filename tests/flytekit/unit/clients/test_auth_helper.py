@@ -12,6 +12,7 @@ from flytekit.clients.auth.authenticator import (
     CommandAuthenticator,
     DeviceCodeAuthenticator,
     PKCEAuthenticator,
+    STSAuthenticator,
 )
 from flytekit.clients.auth.exceptions import AuthenticationError
 from flytekit.clients.auth_helper import (
@@ -139,6 +140,16 @@ def test_get_authenticator_cmd():
     assert authn
     assert isinstance(authn, CommandAuthenticator)
     assert authn._cmd == ["echo"]
+
+
+def test_get_authenticator_sts():
+    cfg = PlatformConfig(auth_mode=AuthType.STS)
+    authn = get_authenticator(cfg, get_client_config())
+    assert isinstance(authn, STSAuthenticator)
+
+    # The string form used in config files resolves to the same authenticator.
+    cfg = PlatformConfig(auth_mode="sts")
+    assert isinstance(get_authenticator(cfg, get_client_config()), STSAuthenticator)
 
 
 def test_get_authenticator_deviceflow():

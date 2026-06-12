@@ -15,6 +15,7 @@ from flytekit.clients.auth.authenticator import (
     CommandAuthenticator,
     DeviceCodeAuthenticator,
     PKCEAuthenticator,
+    STSAuthenticator,
 )
 from flytekit.clients.grpc_utils.auth_interceptor import AuthUnaryInterceptor
 from flytekit.clients.grpc_utils.default_metadata_interceptor import DefaultMetadataInterceptor
@@ -92,6 +93,8 @@ def get_authenticator(cfg: PlatformConfig, cfg_store: ClientConfigStore) -> Auth
             command=cfg.command,
             header_key=client_cfg.header_key if client_cfg else None,
         )
+    elif cfg_auth == AuthType.STS:
+        return STSAuthenticator(endpoint=cfg.endpoint, verify=verify)
     elif cfg_auth == AuthType.DEVICEFLOW:
         return DeviceCodeAuthenticator(
             endpoint=cfg.endpoint,
