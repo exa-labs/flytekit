@@ -1,5 +1,7 @@
 import logging
+import os
 import ssl
+import typing
 from http import HTTPStatus
 
 import grpc
@@ -19,8 +21,40 @@ from flytekit.clients.auth.authenticator import (
 )
 from flytekit.clients.grpc_utils.auth_interceptor import AuthUnaryInterceptor
 from flytekit.clients.grpc_utils.default_metadata_interceptor import DefaultMetadataInterceptor
+from flytekit.clients.grpc_utils.static_metadata_interceptor import StaticMetadataInterceptor
 from flytekit.clients.grpc_utils.wrap_exception_interceptor import RetryExceptionWrapperInterceptor
 from flytekit.configuration import AuthType, PlatformConfig
+
+#: Env var carrying extra gRPC metadata to stamp on every Admin call, as a
+#: comma-separated list of ``key=value`` pairs (e.g. used to forward
+#: caller/session attribution headers to an Admin proxy). Keys are lowercased.
+STATIC_GRPC_METADATA_ENV_VAR = "FLYTE_GRPC_METADATA"
+
+
+def _static_grpc_metadata_from_env() -> typing.List[typing.Tuple[str, str]]:
+    """Parse :data:`STATIC_GRPC_METADATA_ENV_VAR` into ``(key, value)`` pairs.
+
+    Malformed entries (missing ``=``, empty key/value) are skipped so a bad env
+    value can never break channel construction.
+    """
+    raw = os.environ.get(STATIC_GRPC_METADATA_ENV_VAR, "")
+    pairs: typing.List[typing.Tuple[str, str]] = []
+    for item in raw.split(","):
+        key, sep, value = item.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key and value:
+            pairs.append((key, value))
+    return pairs
+
+
+def _maybe_add_static_metadata(channel: grpc.Channel) -> grpc.Channel:
+    """Stack a :class:`StaticMetadataInterceptor` when env metadata is present."""
+    metadata = _static_grpc_metadata_from_env()
+    if metadata:
+        return grpc.intercept_channel(channel, StaticMetadataInterceptor(metadata))
+    return channel
 
 
 class RemoteClientConfigStore(ClientConfigStore):
@@ -197,7 +231,9 @@ def get_channel(cfg: PlatformConfig, **kwargs) -> grpc.Channel:
     :return: grpc.Channel (secure / insecure)
     """
     if cfg.insecure:
-        return grpc.intercept_channel(grpc.insecure_channel(cfg.endpoint, **kwargs), DefaultMetadataInterceptor())
+        return _maybe_add_static_metadata(
+            grpc.intercept_channel(grpc.insecure_channel(cfg.endpoint, **kwargs), DefaultMetadataInterceptor())
+        )
 
     credentials = None
     if "credentials" not in kwargs:
@@ -215,14 +251,16 @@ def get_channel(cfg: PlatformConfig, **kwargs) -> grpc.Channel:
             )
     else:
         credentials = kwargs["credentials"]
-    return grpc.intercept_channel(
-        grpc.secure_channel(
-            target=cfg.endpoint,
-            credentials=credentials,
-            options=kwargs.get("options", None),
-            compression=kwargs.get("compression", None),
-        ),
-        DefaultMetadataInterceptor(),
+    return _maybe_add_static_metadata(
+        grpc.intercept_channel(
+            grpc.secure_channel(
+                target=cfg.endpoint,
+                credentials=credentials,
+                options=kwargs.get("options", None),
+                compression=kwargs.get("compression", None),
+            ),
+            DefaultMetadataInterceptor(),
+        )
     )
 
 

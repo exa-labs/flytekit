@@ -17,13 +17,17 @@ from flytekit.clients.auth.authenticator import (
 from flytekit.clients.auth.exceptions import AuthenticationError
 from flytekit.clients.auth_helper import (
     RemoteClientConfigStore,
+    _static_grpc_metadata_from_env,
     get_authenticator,
+    get_channel,
     get_session,
     upgrade_channel_to_authenticated,
     upgrade_channel_to_proxy_authenticated,
     wrap_exceptions_channel,
 )
 from flytekit.clients.grpc_utils.auth_interceptor import AuthUnaryInterceptor
+from flytekit.clients.grpc_utils.default_metadata_interceptor import DefaultMetadataInterceptor
+from flytekit.clients.grpc_utils.static_metadata_interceptor import StaticMetadataInterceptor
 from flytekit.clients.grpc_utils.wrap_exception_interceptor import RetryExceptionWrapperInterceptor
 from flytekit.configuration import AuthType, PlatformConfig
 
@@ -184,6 +188,38 @@ def test_upgrade_channel_to_proxy_auth():
     )
     assert isinstance(out_ch._interceptor, AuthUnaryInterceptor)
     assert isinstance(out_ch._interceptor._authenticator, CommandAuthenticator)
+
+
+def test_static_grpc_metadata_from_env_parses_pairs(monkeypatch):
+    monkeypatch.setenv("FLYTE_GRPC_METADATA", " agent-session-id=abc , agent-session-owner=octocat ")
+    assert _static_grpc_metadata_from_env() == [
+        ("agent-session-id", "abc"),
+        ("agent-session-owner", "octocat"),
+    ]
+
+
+def test_static_grpc_metadata_from_env_skips_malformed(monkeypatch):
+    monkeypatch.setenv("FLYTE_GRPC_METADATA", "noequals,=noval,nokey=,good=v")
+    assert _static_grpc_metadata_from_env() == [("good", "v")]
+
+
+def test_static_grpc_metadata_from_env_empty(monkeypatch):
+    monkeypatch.delenv("FLYTE_GRPC_METADATA", raising=False)
+    assert _static_grpc_metadata_from_env() == []
+
+
+def test_get_channel_stacks_static_metadata_when_env_set(monkeypatch):
+    monkeypatch.setenv("FLYTE_GRPC_METADATA", "agent-session-id=abc")
+    ch = get_channel(PlatformConfig(endpoint="localhost:8080", insecure=True))
+    # Outermost interceptor is the static-metadata one; the default metadata interceptor sits beneath it.
+    assert isinstance(ch._interceptor, StaticMetadataInterceptor)  # noqa
+    assert isinstance(ch._channel._interceptor, DefaultMetadataInterceptor)  # noqa
+
+
+def test_get_channel_no_static_metadata_when_env_unset(monkeypatch):
+    monkeypatch.delenv("FLYTE_GRPC_METADATA", raising=False)
+    ch = get_channel(PlatformConfig(endpoint="localhost:8080", insecure=True))
+    assert isinstance(ch._interceptor, DefaultMetadataInterceptor)  # noqa
 
 
 def test_get_proxy_authenticated_session():
