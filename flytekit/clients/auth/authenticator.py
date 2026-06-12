@@ -191,6 +191,59 @@ class CommandAuthenticator(Authenticator):
         self._creds = Credentials(output.stdout.strip())
 
 
+class STSAuthenticator(Authenticator):
+    """Authenticates with an AWS STS presigned-URL bearer token.
+
+    Used against Flyte deployments whose Admin proxy validates an AWS identity
+    (via ``sts:GetCallerIdentity``) instead of an OAuth2 id-token. A fresh token
+    is minted for every gRPC call because the presigned URL is only valid for a
+    short window; minting is local SigV4 signing (no network), and the resolved
+    AWS credentials are cached on the instance to avoid repeated credential
+    lookups. On an authentication failure the cache is cleared so rotated
+    credentials are picked up.
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        header_key: typing.Optional[str] = None,
+        expires_in: typing.Optional[int] = None,
+        region: typing.Optional[str] = None,
+        verify: typing.Optional[typing.Union[bool, str]] = None,
+    ):
+        from .aws_sts import DEFAULT_EXPIRES_IN_SECONDS, DEFAULT_STS_REGION
+
+        super().__init__(endpoint, header_key or "authorization", verify=verify)
+        self._expires_in = expires_in or DEFAULT_EXPIRES_IN_SECONDS
+        self._region = region or DEFAULT_STS_REGION
+        self._aws_credentials: typing.Optional[typing.Tuple[str, str, typing.Optional[str]]] = None
+
+    def _mint_token(self) -> str:
+        from .aws_sts import create_sts_token, resolve_aws_credentials
+
+        if self._aws_credentials is None:
+            self._aws_credentials = resolve_aws_credentials()
+        access_key, secret_key, session_token = self._aws_credentials
+        return create_sts_token(
+            access_key,
+            secret_key,
+            session_token,
+            expires_in=self._expires_in,
+            region=self._region,
+        )
+
+    def refresh_credentials(self):
+        # Drop cached AWS credentials so rotated/expired credentials (SSO, IMDS,
+        # assumed-role) are re-resolved on the retry that follows.
+        self._aws_credentials = None
+        self._set_credentials(Credentials(self._mint_token()))
+
+    def fetch_grpc_call_auth_metadata(self) -> typing.Optional[typing.Tuple[str, str]]:
+        # Always mint a fresh presigned token: the URL is short-lived, so caching
+        # a single token across a long-running command would let it expire.
+        return self._header_key, f"Bearer {self._mint_token()}"
+
+
 class ClientCredentialsAuthenticator(Authenticator):
     """
     This Authenticator uses ClientId and ClientSecret to authenticate
