@@ -7,8 +7,7 @@ it, replays the ``GetCallerIdentity`` call against AWS STS, and trusts the
 returned principal ARN as the caller's identity.
 
 This module mints that token using only the standard library so flytekit gains
-no new dependency. It mirrors the scheme used by Exa's ``overseer`` CLI so the
-two clients produce tokens the same proxy accepts.
+no new dependency.
 """
 
 import configparser
