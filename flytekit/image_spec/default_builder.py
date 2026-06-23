@@ -778,7 +778,6 @@ class DefaultImageBuilder(ImageSpecBuilder):
         "commands",
         "copy",
         "install_project",
-        "use_depot",
         "uv_export_args",
         "vendor_local",
         "nix",
@@ -851,20 +850,6 @@ class DefaultImageBuilder(ImageSpecBuilder):
                     ]
                 else:
                     command = ["nix", "build", f"path:{tmp_dir}#packages.{nix_system}.docker"]
-            elif image_spec.use_depot:
-                if not shutil.which("depot"):
-                    raise RuntimeError(
-                        "Depot is not installed or not in PATH. "
-                        "Please install depot (https://depot.dev/docs/installation) or use Docker instead by setting use_depot=False"
-                    )
-                command = [
-                    "depot", "build",
-                    "--tag", f"{image_spec.image_name()}",
-                    "--platform", image_spec.platform,
-                ]
-                if image_spec.registry and push:
-                    command.append("--push")
-                command.append(tmp_dir)
             else:
                 if not shutil.which("docker"):
                     raise RuntimeError(
