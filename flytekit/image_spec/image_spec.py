@@ -82,6 +82,101 @@ def discover_nix_flake_path_inputs(
     return inputs
 
 
+def discover_transitive_nix_flake_path_inputs(
+    lock_dir: typing.Union[str, pathlib.Path],
+    flake_lock_content: str,
+    already_resolved: typing.Optional[typing.Set[pathlib.Path]] = None,
+) -> List[NixFlakePathInput]:
+    """Discover transitive Nix flake path inputs from flake.lock.
+
+    Direct path inputs (parent=[]) are handled by discover_nix_flake_path_inputs
+    via flake.nix parsing. This function finds transitive path inputs — those with
+    a non-empty parent chain in flake.lock — which are dependencies of dependencies.
+
+    Path resolution: each node's ``locked.path`` is relative to the directory of its
+    declaring parent (the last element in the ``parent`` chain). We walk the chain
+    recursively to compute the absolute source path.
+
+    Args:
+        lock_dir: Directory containing flake.lock (same as flake.nix location).
+        flake_lock_content: Contents of flake.lock as a string.
+        already_resolved: Set of already-resolved absolute paths to skip (from direct inputs).
+
+    Returns:
+        List of NixFlakePathInput entries for transitive path dependencies only.
+    """
+    import json as _json
+
+    lock_dir_path = pathlib.Path(lock_dir)
+    already_resolved = already_resolved or set()
+
+    try:
+        lock_obj = _json.loads(flake_lock_content)
+    except Exception:
+        return []
+
+    nodes = lock_obj.get("nodes", {})
+    abs_cache: typing.Dict[str, typing.Optional[pathlib.Path]] = {}
+
+    def _resolve(node_name: str) -> typing.Optional[pathlib.Path]:
+        if node_name in abs_cache:
+            return abs_cache[node_name]
+
+        node = nodes.get(node_name)
+        if not node:
+            abs_cache[node_name] = None
+            return None
+
+        locked = node.get("locked", {})
+        if locked.get("type") != "path":
+            abs_cache[node_name] = None
+            return None
+
+        rel_path = locked.get("path", "")
+        parent_chain = node.get("parent", [])
+
+        if not parent_chain:
+            result = (lock_dir_path / rel_path).resolve()
+        else:
+            declaring_parent = parent_chain[-1]
+            parent_abs = _resolve(declaring_parent)
+            if parent_abs is None:
+                abs_cache[node_name] = None
+                return None
+            result = (parent_abs / rel_path).resolve()
+
+        abs_cache[node_name] = result
+        return result
+
+    transitive: List[NixFlakePathInput] = []
+    for node_name, node in nodes.items():
+        if node_name == "root":
+            continue
+        locked = node.get("locked", {})
+        if locked.get("type") != "path":
+            continue
+        parent_chain = node.get("parent", [])
+        if not parent_chain:
+            continue
+
+        src_path = _resolve(node_name)
+        if src_path is None or not src_path.exists():
+            continue
+        if src_path in already_resolved:
+            continue
+
+        rel_path = locked.get("path", "")
+        transitive.append(
+            NixFlakePathInput(
+                full_spec=f"path:{rel_path}",
+                old_rel_path=rel_path,
+                src_path=src_path,
+            )
+        )
+
+    return transitive
+
+
 def _compute_directory_digest(dir_path: pathlib.Path) -> str:
     """Compute a stable digest for a directory mirroring builder copy logic (respects .gitignore/.dockerignore)."""
     # Imports here to avoid circular imports at module load time

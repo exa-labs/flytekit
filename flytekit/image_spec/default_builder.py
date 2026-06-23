@@ -22,6 +22,7 @@ from flytekit.image_spec.image_spec import (
     ImageSpecBuilder,
     _find_git_root,
     discover_nix_flake_path_inputs,
+    discover_transitive_nix_flake_path_inputs,
 )
 from flytekit.tools.ignore import DockerIgnore, GitIgnore, IgnoreGroup, StandardIgnore
 from flytekit.tools.script_mode import is_vendorable_repo, ls_files
@@ -429,6 +430,40 @@ def _copy_local_packages_and_update_lock(image_spec: ImageSpec, tmp_dir: Path):
 
             # Track mapping for flake.lock updates
             flake_path_replacements[old_rel_path] = new_rel_path
+
+        # Copy transitive path dependencies from flake.lock (dependencies of dependencies).
+        # Direct inputs are already handled above; transitive ones have a non-empty parent chain.
+        # Since local_packages/ mirrors the monorepo structure, relative paths between
+        # transitive deps are preserved automatically — no flake.lock path rewriting needed.
+        already_resolved = {inp.src_path.resolve() for inp in inputs}
+        transitive_inputs = discover_transitive_nix_flake_path_inputs(
+            lock_dir, flake_lock_content, already_resolved
+        )
+        for t_inp in transitive_inputs:
+            t_src = t_inp.src_path
+            t_git_root = _find_git_root(str(t_src))
+            if t_git_root is None:
+                continue
+
+            t_rel = os.path.relpath(path=str(t_src), start=str(t_git_root))
+            t_target = local_packages_dir / t_rel
+            t_target.parent.mkdir(parents=True, exist_ok=True)
+
+            if t_src.is_dir():
+                t_ignore = IgnoreGroup(str(t_src), [GitIgnore, DockerIgnore, StandardIgnore])
+                t_files, _ = ls_files(
+                    str(t_src),
+                    CopyFileDetection.ALL,
+                    deref_symlinks=False,
+                    ignore_group=t_ignore,
+                )
+                for t_file in t_files:
+                    t_file_rel = os.path.relpath(t_file, start=str(t_src))
+                    t_file_dst = t_target / t_file_rel
+                    t_file_dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(t_file, t_file_dst)
+            else:
+                shutil.copy2(str(t_src), str(t_target))
 
         # Update flake.lock JSON for nodes that reference local path inputs
         if flake_path_replacements:
