@@ -67,6 +67,8 @@ def test_non_local_execution(wandb_mock, manager_mock, monkeypatch):
 
     ctx_mock.user_space_params.secrets.get.return_value = "this_is_the_secret"
     ctx_mock.user_space_params.execution_id.name = "my_execution_id"
+    ctx_mock.user_space_params.execution_id.project = "my_project"
+    ctx_mock.user_space_params.execution_id.domain = "staging"
 
     manager_mock.current_context.return_value = ctx_mock
     execution_url = "http://execution_url.com/afsdfsafafasdfs"
@@ -82,6 +84,16 @@ def test_non_local_execution(wandb_mock, manager_mock, monkeypatch):
     ctx_mock.user_space_params.secrets.get.assert_called_with(key="abc", group="xyz")
     wandb_mock.login.assert_called_with(key="this_is_the_secret", host="https://api.wandb.ai")
     assert run_mock.notes == f"[Execution URL]({execution_url})"
+
+    # Verify Flyte execution metadata is stored in wandb config
+    run_mock.config.update.assert_called_once_with(
+        {
+            "flyte_execution_id": "my_execution_id",
+            "flyte_execution_project": "my_project",
+            "flyte_execution_domain": "staging",
+        },
+        allow_val_change=True,
+    )
 
 
 def test_errors():
