@@ -3,6 +3,7 @@ import contextlib
 import datetime
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import tempfile
 import textwrap
 import time
 import traceback
+import typing
 import uuid
 import warnings
 from sys import exit
@@ -398,6 +400,66 @@ def get_one_of(*args) -> str:
     return ""
 
 
+_CHECKPOINT_ATTEMPT_RE = re.compile(r"(.*)-dn0-(\d+)(/_flytecheckpoints/.*)$")
+
+
+def _build_checkpoint_src_list(
+    checkpoint_path: str,
+    prev_checkpoint: typing.Optional[str],
+) -> typing.List[str]:
+    """Build an ordered list of previous checkpoint paths to try during restore.
+
+    Flyte Propeller passes a single ``prev_checkpoint`` pointing at attempt N-1.
+    If that attempt was killed before writing a checkpoint the chain breaks.
+    This function generates paths for *all* previous attempts (N-1 … 0) so the
+    checkpointer can walk back and find the most recent successful one.
+
+    The checkpoint path pattern is:
+        ``<prefix>-dn0-{attempt}/_flytecheckpoints/``
+
+    If we cannot parse the pattern we fall back to ``[prev_checkpoint]``.
+
+    Args:
+        checkpoint_path: The checkpoint *destination* for the current attempt.
+        prev_checkpoint: The single previous checkpoint path from Propeller (may be None).
+
+    Returns:
+        A list of checkpoint source paths ordered most-recent-attempt first.
+    """
+    if not checkpoint_path:
+        return [prev_checkpoint] if prev_checkpoint else []
+
+    m = _CHECKPOINT_ATTEMPT_RE.search(checkpoint_path)
+    if not m:
+        # Cannot parse — fall back to the single prev_checkpoint from Propeller
+        return [prev_checkpoint] if prev_checkpoint else []
+
+    prefix, current_attempt_str, suffix = m.group(1), m.group(2), m.group(3)
+    current_attempt = int(current_attempt_str)
+
+    if current_attempt == 0:
+        # First attempt — nothing to walk back to
+        return []
+
+    # Build paths N-1, N-2, … 0 using the same prefix structure.
+    # NOTE: The prefix (including the hash) may differ across attempts because
+    # Propeller computes it per-attempt.  We use the *current* attempt's prefix
+    # as the best guess — the hash typically stays the same within one execution.
+    # If Propeller provided prev_checkpoint, keep it first because its prefix is
+    # guaranteed correct for attempt N-1.
+    srcs: typing.List[str] = []
+    if prev_checkpoint:
+        srcs.append(prev_checkpoint)
+
+    for attempt in range(current_attempt - 1, -1, -1):
+        candidate = f"{prefix}-dn0-{attempt}{suffix}"
+        if candidate not in srcs:
+            srcs.append(candidate)
+
+    logger.debug(f"Checkpoint source candidates ({len(srcs)}): {srcs}")
+    return srcs
+
+
 @contextlib.contextmanager
 def setup_execution(
     raw_output_data_prefix: str,
@@ -440,8 +502,9 @@ def setup_execution(
 
     checkpointer = None
     if checkpoint_path is not None:
-        checkpointer = SyncCheckpoint(checkpoint_dest=checkpoint_path, checkpoint_src=prev_checkpoint)
-        logger.debug(f"Checkpointer created with source {prev_checkpoint} and dest {checkpoint_path}")
+        checkpoint_srcs = _build_checkpoint_src_list(checkpoint_path, prev_checkpoint)
+        checkpointer = SyncCheckpoint(checkpoint_dest=checkpoint_path, checkpoint_src=checkpoint_srcs)
+        logger.debug(f"Checkpointer created with {len(checkpoint_srcs)} source(s) and dest {checkpoint_path}")
 
     execution_parameters = ExecutionParameters(
         execution_id=_identifier.WorkflowExecutionIdentifier(
