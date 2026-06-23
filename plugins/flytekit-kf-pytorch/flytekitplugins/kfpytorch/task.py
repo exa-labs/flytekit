@@ -131,8 +131,18 @@ class Elastic(object):
 
     Use this to run single- or multi-node distributed pytorch elastic training on k8s.
 
-    Single-node elastic training is executed in a k8s pod when `nnodes` is set to 1.
-    Multi-node training is executed otherwise using a `Pytorch Job <https://github.com/kubeflow/training-operator>`_.
+    By default, single-node elastic training (`nnodes == 1`) is executed as a standalone k8s pod
+    (`task_type == "python-task"`) and multi-node training (`nnodes > 1`) is executed as a
+    `Pytorch Job <https://github.com/kubeflow/training-operator>`_ (`task_type == "pytorch"`).
+
+    The standalone path skips the kubeflow training-operator, but also means the training pod
+    ends up sharing a volcano-auto-created PodGroup with the flyte launcher pod (same
+    OwnerReferences). That PodGroup defaults to `minMember=1`, so the launcher's Succeed
+    transitions the gang to `phase=Completed` before the training pod is even Pending and
+    volcano's preempt action skips it. Set `use_pytorch_job=True` to force the PyTorchJob CRD
+    path even for `nnodes == 1`; the training-operator then creates a dedicated PodGroup keyed
+    on the PyTorchJob (independent of the launcher) with `minMember == nnodes`, which volcano
+    preemption + gang scheduling can evaluate.
 
     Like `torchrun`, this plugin sets the environment variable `OMP_NUM_THREADS` to 1 if it is not set.
     Please see https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html for potential performance improvements.
@@ -155,6 +165,10 @@ class Elastic(object):
             an `emptyDir` volume with medium `Memory` to to `/dev/shm`.
             The shared memory size upper limit is the sum of the memory limits of the containers in the pod.
         run_policy: Configuration for the run policy.
+        use_pytorch_job (bool): Force `task_type == "pytorch"` + emit a `DistributedPyTorchTrainingTask`
+            with `min=max=nnodes` even when `nnodes == 1`. The default (False) preserves the
+            standalone-pod path for single-node; set True when the pod needs to participate in
+            a dedicated volcano PodGroup (e.g. for gang scheduling or priority-based preemption).
     """
 
     nnodes: Union[int, str] = 1
@@ -165,6 +179,7 @@ class Elastic(object):
     rdzv_configs: Dict[str, Any] = field(default_factory=lambda: {"timeout": 900, "join_timeout": 900})
     increase_shared_mem: bool = True
     run_policy: Optional[RunPolicy] = None
+    use_pytorch_job: bool = False
 
 
 class PyTorchFunctionTask(PythonFunctionTask[PyTorch]):
@@ -318,8 +333,23 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
     _ELASTIC_TASK_TYPE = "pytorch"
     _ELASTIC_TASK_TYPE_STANDALONE = "python-task"
 
+    @staticmethod
+    def _resolve_task_type(task_config: Elastic) -> str:
+        """Return the flyte task_type that the current Elastic config should register as.
+
+        nnodes > 1 always needs the PyTorchJob CRD (rendezvous over the training-operator).
+        nnodes == 1 defaults to the standalone pod path, but callers can force PyTorchJob
+        with `Elastic(use_pytorch_job=True)` when they need a dedicated volcano PodGroup
+        (gang scheduling, preemption), since the standalone pod otherwise piggybacks on the
+        flyte launcher's auto-PodGroup with minMember=1 and is marked Completed the moment
+        the launcher pod Succeeds.
+        """
+        if task_config.nnodes != 1 or task_config.use_pytorch_job:
+            return PytorchElasticFunctionTask._ELASTIC_TASK_TYPE
+        return PytorchElasticFunctionTask._ELASTIC_TASK_TYPE_STANDALONE
+
     def __init__(self, task_config: Elastic, task_function: Callable, **kwargs):
-        task_type = self._ELASTIC_TASK_TYPE_STANDALONE if task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
+        task_type = self._resolve_task_type(task_config)
 
         super(PytorchElasticFunctionTask, self).__init__(
             task_config=task_config,
@@ -355,14 +385,14 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         is modified via with_overrides (e.g., in a dynamic task), the task_type is correctly
         updated to reflect the new configuration.
 
-        When nnodes == 1, returns "python-task" (standalone execution in a single pod).
-        When nnodes > 1, returns "pytorch" (PyTorchJob CRD for multi-node training).
+        When nnodes == 1 and use_pytorch_job is False, returns "python-task" (standalone execution in a single pod).
+        Otherwise returns "pytorch" (PyTorchJob CRD routed through kubeflow training-operator).
 
         This fixes a bug where overriding a single-node Elastic config to multi-node via
         with_overrides would not change the task_type, causing the task to still run as
         a standalone pod instead of a PyTorchJob.
         """
-        return self._ELASTIC_TASK_TYPE_STANDALONE if self._task_config.nnodes == 1 else self._ELASTIC_TASK_TYPE
+        return self._resolve_task_type(self._task_config)
 
     @property
     def environment(self) -> Dict[str, str]:
@@ -556,7 +586,7 @@ class PytorchElasticFunctionTask(PythonFunctionTask[Elastic]):
         return self._execute(**kwargs)
 
     def get_custom(self, settings: SerializationSettings) -> Optional[Dict[str, Any]]:
-        if self._task_config.nnodes == 1:
+        if self._resolve_task_type(self._task_config) == self._ELASTIC_TASK_TYPE_STANDALONE:
             """
             Torch elastic distributed training is executed in a normal k8s pod so that this
             works without the kubeflow train operator.

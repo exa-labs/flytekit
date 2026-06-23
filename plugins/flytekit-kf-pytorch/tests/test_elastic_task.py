@@ -363,6 +363,66 @@ def test_task_type_with_string_nnodes() -> None:
     assert elastic_range_task.task_type == "python-task"
 
 
+def test_use_pytorch_job_forces_pytorchjob_for_single_node() -> None:
+    """`use_pytorch_job=True` forces the PyTorchJob path even when nnodes == 1.
+
+    Needed for volcano preemption / gang scheduling: the standalone-pod path puts the
+    training pod in the flyte launcher's auto-PodGroup (minMember=1, phase=Completed the
+    moment the launcher Succeeds), so volcano's preempt action never evaluates it. The
+    PyTorchJob path causes the training-operator to create a dedicated PodGroup.
+    """
+
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=2, use_pytorch_job=True))
+    def forced_pytorchjob_task():
+        pass
+
+    assert forced_pytorchjob_task.task_type == "pytorch"
+
+    # Default stays standalone for backward compat.
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=2))
+    def default_standalone_task():
+        pass
+
+    assert default_standalone_task.task_type == "python-task"
+
+
+def test_use_pytorch_job_emits_elastic_custom_for_single_node() -> None:
+    """`use_pytorch_job=True` emits `DistributedPyTorchTrainingTask` custom even for nnodes == 1.
+
+    The standalone path has no kubeflow-plugin custom (`super().get_custom()`), so flyte-propeller
+    creates a raw pod. Forcing the PyTorchJob custom with `min_replicas = max_replicas = 1`
+    routes through the kubeflow plugin + training-operator.
+    """
+    from flytekit.configuration import Image, ImageConfig, SerializationSettings
+
+    settings = SerializationSettings(
+        project="proj",
+        domain="dom",
+        version="v",
+        image_config=ImageConfig(default_image=Image(name="default", fqn="x", tag="y")),
+    )
+
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=2, use_pytorch_job=True))
+    def forced_pytorchjob_task():
+        pass
+
+    custom = forced_pytorchjob_task.get_custom(settings)
+    assert custom is not None
+    assert custom["workerReplicas"]["replicas"] == 1
+    assert custom["elasticConfig"]["minReplicas"] == 1
+    assert custom["elasticConfig"]["maxReplicas"] == 1
+    assert custom["elasticConfig"]["nprocPerNode"] == 2
+
+    # Without the flag, single-node falls through to super().get_custom() which has no
+    # kubeflow-plugin fields.
+    @task(task_config=Elastic(nnodes=1, nproc_per_node=2))
+    def default_standalone_task():
+        pass
+
+    default_custom = default_standalone_task.get_custom(settings)
+    assert default_custom is None or "workerReplicas" not in (default_custom or {})
+
+
 def test_environment_includes_elastic_config() -> None:
     """Test that environment property includes elastic config as environment variables.
 
