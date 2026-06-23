@@ -67,7 +67,6 @@ class TestBuildErrorHandling:
         spec = ImageSpec(
             name="test-build",
             packages=["numpy"],
-            use_depot=False,
         )
         
         builder = DefaultImageBuilder()
@@ -91,7 +90,6 @@ class TestBuildErrorHandling:
         spec = ImageSpec(
             name="test-build",
             packages=["numpy"],
-            use_depot=False,
         )
         
         builder = DefaultImageBuilder()
@@ -103,28 +101,7 @@ class TestBuildErrorHandling:
         # Verify
         assert "Docker daemon is not running" in str(exc_info.value)
     
-    @patch('shutil.which')
-    def test_depot_not_installed(self, mock_which):
-        """Test error when depot is not installed."""
-        # Setup
-        mock_which.return_value = None
-        
-        spec = ImageSpec(
-            name="test-depot",
-            packages=["numpy"],
-            use_depot=True,
-        )
-        
-        builder = DefaultImageBuilder()
-        
-        # Test
-        with pytest.raises(RuntimeError) as exc_info:
-            builder._build_image(spec, push=False)
-        
-        # Verify
-        assert "Depot is not installed or not in PATH" in str(exc_info.value)
-        assert "https://depot.dev/docs/installation" in str(exc_info.value)
-        assert "use_depot=False" in str(exc_info.value)
+
 
 
 class TestEnvdErrorHandling:

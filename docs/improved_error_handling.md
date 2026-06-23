@@ -26,20 +26,13 @@ When attempting to build images, the system now checks if the required build too
 
 **Scenario 1**: Docker not installed
 ```
-RuntimeError: Docker is not installed or not in PATH. Please install Docker (https://docs.docker.com/get-docker/) or use depot by setting use_depot=True
+RuntimeError: Docker is not installed or not in PATH. Please install Docker (https://docs.docker.com/get-docker/)
 ```
 
 **Scenario 2**: Docker installed but daemon not running
 ```
 RuntimeError: Docker daemon is not running or not accessible. Error: <error details>
-Please start Docker daemon or use depot by setting use_depot=True
-```
-
-#### Depot Build Errors
-
-When `use_depot=True` but depot is not installed:
-```
-RuntimeError: Depot is not installed or not in PATH. Please install depot (https://depot.dev/docs/installation) or use Docker instead by setting use_depot=False
+Please start Docker daemon.
 ```
 
 #### Envd Build Errors
@@ -58,7 +51,7 @@ RuntimeError: envd is not installed or not in PATH. Please install envd (https:/
    - Added error handling for ECR images when neither Docker nor AWS CLI is available
 
 2. **`flytekit/image_spec/default_builder.py`**
-   - Added pre-build checks for Docker/depot availability
+   - Added pre-build checks for Docker availability
    - Added Docker daemon connectivity check
    - Provides clear error messages with installation links
 
@@ -95,19 +88,18 @@ except RuntimeError as e:
 spec = ImageSpec(
     name="my-app",
     packages=["scikit-learn"],
-    use_depot=False,
 )
 
 # If Docker is not installed/running, will get clear error with instructions
 
-# Building with depot
+# Building with nix
 spec = ImageSpec(
     name="my-app",
     packages=["tensorflow"],
-    use_depot=True,
+    nix=True,
 )
 
-# If depot is not installed, will get clear error with installation link
+# If nix is not installed, will get clear error with installation link
 ```
 
 ## Testing
