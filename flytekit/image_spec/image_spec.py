@@ -25,6 +25,8 @@ DOCKER_HUB = "docker.io"
 _F_IMG_ID = "_F_IMG_ID"
 FLYTE_FORCE_PUSH_IMAGE_SPEC = "FLYTE_FORCE_PUSH_IMAGE_SPEC"
 
+_ecr_existence_cache: Dict[Tuple[str, str, str], bool] = {}
+
 
 # Shared helpers for Nix flake path inputs and git root discovery
 _NIX_FLAKE_PATH_INPUT_PATTERN = re.compile(r'url\s*=\s*"(path:([^"]+))"')
@@ -132,8 +134,12 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
         f"Extracted - Account ID: {account_id}, Region: {region}, Repository: {repository}, Tag: {tag}", fg="cyan"
     )
 
+    cache_key = (registry, repository, tag)
+    if cache_key in _ecr_existence_cache:
+        cached = _ecr_existence_cache[cache_key]
+        return cached
+
     try:
-        # Use AWS CLI to check if image exists
         image_ids_json = json.dumps([{"imageTag": tag}])
         cmd = [
             "aws",
@@ -149,16 +155,16 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
             "json",
         ]
 
-        # Output the command being executed
         click.secho(f"Executing AWS ECR command: {' '.join(cmd)}", fg="blue")
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
         if result.returncode == 0:
             data = json.loads(result.stdout)
-            return len(data.get("imageDetails", [])) > 0
+            exists = len(data.get("imageDetails", [])) > 0
+            _ecr_existence_cache[cache_key] = exists
+            return exists
         elif result.returncode != 0:
-            # Check for various image not found scenarios
             if any(
                 phrase in result.stderr
                 for phrase in [
@@ -169,9 +175,9 @@ def check_ecr_image_exists(registry: str, repository: str, tag: str) -> Optional
                 ]
             ):
                 click.secho(f"Image not found in ECR: {result.stderr}", fg="yellow")
+                _ecr_existence_cache[cache_key] = False
                 return False
             else:
-                # Some other error occurred
                 click.secho(f"Failed to check ECR image: {result.stderr}", fg="yellow")
                 return None
     except subprocess.TimeoutExpired:
